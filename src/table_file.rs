@@ -1,11 +1,13 @@
 #![allow(dead_code)]
-use owo_colors::OwoColorize;
 use std::cmp::max;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Result, Seek, SeekFrom, Write};
 
+use owo_colors::OwoColorize;
+
 use crate::constants::{DataType, PageType, PAGE_SIZE};
 use crate::database_file::DatabaseFile;
+use crate::read_write_types::ReadWriteTypes;
 use crate::record::Record;
 use crate::utils::rainbow;
 
@@ -21,6 +23,8 @@ impl DatabaseFile for TableFile {
         self.file.set_len(length)
     }
 }
+
+impl ReadWriteTypes for TableFile {}
 
 impl Read for TableFile {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -344,7 +348,6 @@ impl TableFile {
             current_page = self.read_u32()?;
             page_type = self.get_page_type(current_page)?;
         }
-        println!("current_page: {}", current_page);
 
         while current_page != 0xFFFFFFFF {
             self.seek_to_page(current_page)?;
@@ -355,8 +358,6 @@ impl TableFile {
                 let record = self.read_record(current_page, offset)?;
                 if record.compare_column(column_id as usize, &value, operator) {
                     records.push(record);
-                } else {
-                    println!("Record {} does not match with {}", record.row_id, record.values[column_id as usize]);
                 }
             }
             self.seek_to_page_offset(current_page, 0x06)?;
@@ -365,15 +366,15 @@ impl TableFile {
         return Ok(records);
     }
 
-    pub fn dump(&mut self) -> Result<()> {
+    pub fn print(&mut self) -> Result<()> {
         let num_pages = self.len()? / PAGE_SIZE;
         for i in 0..num_pages {
-            self.dump_page(i as u32)?;
+            self.print_page(i as u32)?;
         }
         Ok(())
     }
 
-    pub fn dump_page(&mut self, page: u32) -> Result<()> {
+    pub fn print_page(&mut self, page: u32) -> Result<()> {
         self.seek_to_page(page)?;
         let page_type = self.read_u8()?;
         let unused_space = self.read_u8()?;
@@ -412,122 +413,123 @@ impl TableFile {
         print!("{} ", num_cells.blue());
         print!("{} ", content_start.purple());
         println!();
+        let mut offsets: Vec<u16> = vec![0; num_cells as usize];
         if num_cells > 0 {
             print!("{:08X}  ", 0x10 + page_start);
             for i in 0..num_cells {
-                print!(
-                    "{} ",
-                    rainbow(&format!("{:04X}", self.read_u16()?), i as usize)
-                );
+                let offset = self.read_u16()?;
+                offsets[i as usize] = offset;
+                print!("{} ", rainbow(&format!("{:04X}", offset), i as usize));
             }
-            println!("\n*");
+            println!();
             if page_type == PageType::TableLeaf {
-                self.dump_leaf_cells(page, num_cells, content_start)?;
+                self.print_leaf_cells(page, offsets)?;
             } else {
-                self.dump_inner_cells(page, num_cells, content_start)?;
+                self.print_inner_cells(page, offsets)?;
             }
         }
         Ok(())
     }
 
-    fn dump_inner_cells(&mut self, page: u32, num_cells: u16, content_start: u16) -> Result<()> {
-        let page_start = page as u64 * PAGE_SIZE;
-        self.seek_to_page_offset(page, content_start)?;
+    fn print_inner_cells(&mut self, page: u32, offsets: Vec<u16>) -> Result<()> {
+        let page_start = page as u16 * PAGE_SIZE as u16;
         println!("{:8}  {:8} {:8}", "", "Page".blue(), "Row ID".yellow());
-        for i in 0..num_cells {
+        for (i, &o) in offsets.iter().enumerate() {
+            self.seek_to_page_offset(page, o)?;
             let page = self.read_u32()?;
             let row_id = self.read_u32()?;
-            print!(
-                "{}  ",
-                rainbow(
-                    &format!("{:08X}", content_start as u64 + i as u64 * 8 + page_start),
-                    i as usize
-                )
-            );
+            print!("{}  ", rainbow(&format!("{:08X}", o + page_start), i));
             println!("{:08X} {:08X}", page.blue(), row_id.yellow());
         }
         Ok(())
     }
 
-    fn dump_leaf_cells(&mut self, page: u32, num_cells: u16, content_start: u16) -> Result<()> {
-        let page_start = page as u64 * PAGE_SIZE;
-        self.seek_to_page_offset(page, content_start)?;
-        let mut offset = content_start;
+    fn print_leaf_cells(&mut self, page: u32, offsets: Vec<u16>) -> Result<()> {
+        let page_start = page as u16 * PAGE_SIZE as u16;
         let mut records = vec![];
-        let mut offsets = vec![];
-        for _ in 0..num_cells {
-            let record = self.read_record(page, offset)?;
-            offsets.push(offset);
-            offset += record.record_size + 6;
-            records.push(record);
+        for i in 0..offsets.len() {
+            let o = offsets[i];
+            self.seek_to_page_offset(page, o)?;
+            let record_size = self.read_u16()?;
+            if i > 0 && o + record_size + 6 > offsets[i - 1] {
+                records.push(None);
+            } else {
+                let record = self.read_record(page, o)?;
+                records.push(Some(record));
+            }
         }
-        let mut max_column_widths = vec![0; records[0].values.len()];
+        let num_columns = records
+            .iter()
+            .filter(|r| r.is_some())
+            .next()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .values
+            .len();
+        let mut column_widths = vec![0; num_columns];
         for record in &records {
-            for (i, value) in record.values.iter().enumerate() {
-                max_column_widths[i] = max(max_column_widths[i], value.to_string().len());
+            if let Some(record) = record {
+                for (i, value) in record.values.iter().enumerate() {
+                    column_widths[i] = max(column_widths[i], value.to_string().len());
+                }
             }
         }
         println!(
-            "{:8}  {:4} {:8} {:width$} {}",
-            "",
+            "          {:4} {:8} {:width$} {}",
             "Size".blue(),
             "Row ID".yellow(),
             "Columns",
             "Values",
-            width = max_column_widths.len() * 3 - 1
+            width = column_widths.len() * 3 - 1
         );
-        for (j, record) in records.iter().enumerate() {
-            print!(
-                "{}  ",
-                rainbow(
-                    &format!("{:08X}", offsets[j] as u64 + page_start),
-                    records.len() - j - 1
-                )
-            );
+        for (j, (record, &o)) in records.iter().zip(&offsets).enumerate().rev() {
+            print!("{}  ", rainbow(&format!("{:08X}", o + page_start), j));
+            if record.is_none() {
+                print!("{}", "MALFORMED RECORD:".on_red());
+                let num_malfomed_bytes = offsets[j - 1] - o;
+                let mut malformed_bytes = vec![0; num_malfomed_bytes as usize];
+                self.seek_to_page_offset(page, o)?;
+                self.read_exact(&mut malformed_bytes)?;
+                let record_size = u16::from_le_bytes([malformed_bytes[0], malformed_bytes[1]]);
+                println!(
+                    " should be {} bytes but is {} {}",
+                    record_size,
+                    malformed_bytes.len(),
+                    malformed_bytes
+                        .iter()
+                        .map(|b| format!("{:02X} ", b.on_red()))
+                        .collect::<String>()
+                );
+                continue;
+            }
+            let record = record.as_ref().unwrap();
             print!("{:04X} ", record.record_size.blue());
             print!("{:08X} ", record.row_id.yellow());
             for (i, column) in record.values.iter().enumerate() {
                 let col_u8: u8 = column.into();
                 print!("{} ", rainbow(&format!("{:02X}", col_u8), i));
             }
-            // println!();
-            // print!("{:10}", " ");
-            // for (i, value) in record.values.iter().enumerate() {
-            //     let value_bytes: Vec<u8> = value.into();
-            //     let value_str = if value_bytes.len() > 8 {
-            //         value_bytes[value_bytes.len() - 4..]
-            //             .iter()
-            //             .rev()
-            //             .map(|b| format!("{:02X}", b))
-            //             .collect::<Vec<String>>()
-            //             .join("")
-            //             + ".."
-            //             + &value_bytes[..4]
-            //                 .iter()
-            //                 .rev()
-            //                 .map(|b| format!("{:02X}", b))
-            //                 .collect::<Vec<String>>()
-            //                 .join("")
-            //     } else {
-            //         value_bytes
-            //             .iter()
-            //             .rev()
-            //             .map(|b| format!("{:02X}", b))
-            //             .collect::<Vec<String>>()
-            //             .join("")
-            //     };
-            //     print!("{} ", rainbow(value_str.as_str(), i),);
-            // }
-            // println!();
-            // print!("{:10}", " ");
             for (i, value) in record.values.iter().enumerate() {
-                let value_str = rainbow(
-                    format!("{:width$}", value.to_string(), width = max_column_widths[i]).as_str(),
-                    i,
-                );
+                let value_str = rainbow(&format!("{:width$}", value, width = column_widths[i]), i);
                 print!("{} ", value_str);
             }
             println!();
+            if j > 0 && o + record.record_size + 6 < offsets[j - 1] {
+                self.seek_to_page_offset(page, o + record.record_size + 6)?;
+                let num_missing_bytes = offsets[j - 1] - o - record.record_size - 6;
+                let mut missing_bytes = vec![0; num_missing_bytes as usize];
+                self.read_exact(&mut missing_bytes)?;
+                let o2 = o + record.record_size + 6 + page_start;
+                println!(
+                    "{:08X}  {}",
+                    o2,
+                    missing_bytes
+                        .iter()
+                        .map(|b| format!("{:02X} ", b.on_red()))
+                        .collect::<String>()
+                );
+            }
         }
         Ok(())
     }
@@ -565,7 +567,10 @@ mod tests {
             let str_values: Vec<&str> = line.split(';').collect();
             let mut values = vec![];
             for (j, value) in str_values.iter().enumerate() {
-                let v = DataType::parse_str(columns[j].clone(), value);
+                let v = match DataType::parse_str(columns[j].clone(), value) {
+                    Ok(v) => v,
+                    Err(e) => panic!("Error parsing value: {}", e),
+                };
                 values.push(v);
             }
             let record = Record::new(values, i as u32);
@@ -686,13 +691,11 @@ mod tests {
         for record in &records {
             table_file.append_record(record.clone())?;
         }
-        let new_text = DataType::Text("TEST UPDATE RECORD ABC DEF GHI JKL MNO PQR STU VWX YZ".to_string());
+        let new_text =
+            DataType::Text("TEST UPDATE RECORD ABC DEF GHI JKL MNO PQR STU VWX YZ".to_string());
         table_file.update_record(9, 1, new_text.clone())?;
         let updated_record = table_file.get_record(9)?;
-        assert_eq!(
-            new_text,
-            updated_record.values[1]
-        );
+        assert_eq!(new_text, updated_record.values[1]);
         tear_down("test_update_record");
         Ok(())
     }
@@ -724,10 +727,6 @@ mod tests {
             table_file.append_record(record.clone())?;
         }
         let search_results = table_file.search(2, search_value, ">=")?;
-        // println!("real_results");
-        // println!("{:#?}", real_results);
-        // println!("search_results");
-        // println!("{:#?}", search_results);
         assert_eq!(real_results.len(), search_results.len());
         for (real_result, search_result) in real_results.iter().zip(search_results.iter()) {
             assert_eq!(*real_result, search_result);
@@ -750,7 +749,7 @@ mod tests {
         assert_eq!(0x200, content_start);
         assert_eq!(0xFFFFFFFF, right_most_child);
         assert_eq!(1, parent_page);
-        // tear_down("test_split_page");
+        tear_down("test_split_page");
         Ok(())
     }
 }

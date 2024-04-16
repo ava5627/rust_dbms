@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_variables)]
 use crate::{constants::DataType, index_file::IndexFile, record::Record};
 
 struct Column {
