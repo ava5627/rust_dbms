@@ -34,6 +34,12 @@ fn main() {
     let file_name = file.file_name().unwrap().to_str().unwrap().split('.').next().unwrap();
     let dir = std::path::Path::new(file).parent().unwrap().to_str().unwrap();
     let mut table = table_file::TableFile::new(file_name, dir);
-    table.dump().ok();
-    table.print().ok();
+    if args.len() == 2 {
+        table.dump();
+        table.print();
+    } else if args.len() == 3 {
+        let page_num = u32::from_str_radix(&args[2], 16).unwrap();
+        table.dump_page(page_num);
+        table.print_page(page_num);
+    }
 }

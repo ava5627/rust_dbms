@@ -8,51 +8,48 @@ use crate::utils::rainbow;
 use owo_colors::OwoColorize;
 
 pub trait DumpFile: DatabaseFile + ReadWriteTypes {
-    fn dump(&mut self) -> std::io::Result<()>;
-    fn dump_page(&mut self, page_num: u32) -> std::io::Result<()>;
+    fn dump(&mut self);
+    fn dump_page(&mut self, page_num: u32);
 
-    fn dump_bytes(&mut self, bytes: &[u8]) -> std::io::Result<String> {
+    fn dump_bytes(&mut self, bytes: &[u8]) -> String {
         let mut bytes_str = String::new();
         for byte in bytes {
             bytes_str.push_str(&format!("{:02X} ", byte));
         }
-        Ok(bytes_str)
+        bytes_str
     }
 }
 
 impl DumpFile for TableFile {
-    fn dump(&mut self) -> std::io::Result<()> {
-        let num_pages = self.len()? / PAGE_SIZE;
+    fn dump(&mut self) {
+        let num_pages = self.len() / PAGE_SIZE;
         println!("num_pages: {}", num_pages);
         for i in 0..num_pages as u32 {
-            self.dump_page(i)?;
+            self.dump_page(i);
             println!();
         }
-        Ok(())
     }
 
-    fn dump_page(&mut self, page_num: u32) -> std::io::Result<()> {
+    fn dump_page(&mut self, page_num: u32) {
         let page_offset = page_num * PAGE_SIZE as u32;
         let bytes_per_row = 16;
         let num_rows = PAGE_SIZE as u32 / bytes_per_row;
+        self.seek_to_page(page_num);
         print!("{:08X}  | ", page_offset);
-        let page_type = self.read_u8()?;
-        print!("{}", self.dump_bytes(&[page_type])?.green());
-        let unused = self.read_u8()?;
-        print!("{}", self.dump_bytes(&[unused])?);
-        let num_cells = self.read_u16()?;
-        print!("{}", self.dump_bytes(&num_cells.to_le_bytes())?.blue());
-        let content_start = self.read_u16()?;
-        print!(
-            "{}",
-            self.dump_bytes(&content_start.to_le_bytes())?.purple()
-        );
-        let next_page = self.read_u32()?;
-        print!("{}", self.dump_bytes(&next_page.to_le_bytes())?.yellow());
-        let parent_page = self.read_u32()?;
-        print!("{}", self.dump_bytes(&parent_page.to_le_bytes())?.cyan());
-        let unused = self.read_u16()?;
-        print!("{}", self.dump_bytes(&unused.to_le_bytes())?);
+        let page_type = self.read_u8();
+        print!("{}", self.dump_bytes(&[page_type]).green());
+        let unused = self.read_u8();
+        print!("{}", self.dump_bytes(&[unused]));
+        let num_cells = self.read_u16();
+        print!("{}", self.dump_bytes(&num_cells.to_le_bytes()).blue());
+        let content_start = self.read_u16();
+        print!("{}", self.dump_bytes(&content_start.to_le_bytes()).purple());
+        let next_page = self.read_u32();
+        print!("{}", self.dump_bytes(&next_page.to_le_bytes()).yellow());
+        let parent_page = self.read_u32();
+        print!("{}", self.dump_bytes(&parent_page.to_le_bytes()).cyan());
+        let unused = self.read_u16();
+        print!("{}", self.dump_bytes(&unused.to_le_bytes()));
         print!(" | ");
         print!("{:?} ", PageType::from(page_type).green());
         print!("{} ", num_cells.blue());
@@ -71,7 +68,8 @@ impl DumpFile for TableFile {
         for i in 1..num_rows {
             let mut row_bytes = vec![0; bytes_per_row as usize];
             let mut pretty_row: Vec<String> = vec![];
-            self.read_exact(&mut row_bytes)?;
+            self.read_exact(&mut row_bytes)
+                .expect("Failed to read row bytes");
             if row_bytes.iter().all(|&b| b == 0) {
                 if !skip {
                     print!("{:08X}  | ", page_offset + i * bytes_per_row);
@@ -135,41 +133,36 @@ impl DumpFile for TableFile {
                                     let col_index = current_row_index as usize - 7;
                                     cols[col_index] = byte;
                                     rainbow(format!("{:02X} ", byte).as_str(), col_index)
-                                } else {
-                                    if col_num < cols.len() as u8 {
-                                        let col_size = DataType::size_type(cols[col_num as usize]);
-                                        let out = rainbow(
-                                            format!("{:02X} ", byte).as_str(),
-                                            col_num as usize,
-                                        )
-                                        .on_truecolor(20, 20, 20)
-                                        .to_string();
-                                        if col_index == col_size - 1 {
-                                            let col_bytes = &row_bytes
-                                                [row_bytes.len() as usize - col_size as usize..];
-                                            let col_type = cols[col_num as usize];
-                                            let col_value = match DataType::try_from((
-                                                col_type,
-                                                col_bytes.to_vec(),
-                                            )) {
-                                                Ok(value) => rainbow(
-                                                    &format!("{:?}", value),
-                                                    col_num as usize,
-                                                ),
-                                                Err(_) => {
-                                                    "Error parsing value".on_red().to_string()
-                                                }
-                                            };
-                                            pretty_row.push(col_value);
-                                            col_num += 1;
-                                            col_index = 0;
-                                        } else {
-                                            col_index += 1;
-                                        }
-                                        out
+                                } else if col_num < cols.len() as u8 {
+                                    let col_size = DataType::size_type(cols[col_num as usize]);
+                                    let out = rainbow(
+                                        format!("{:02X} ", byte).as_str(),
+                                        col_num as usize,
+                                    )
+                                    .on_truecolor(20, 20, 20)
+                                    .to_string();
+                                    if col_index == col_size - 1 {
+                                        let col_bytes =
+                                            &row_bytes[row_bytes.len() - col_size as usize..];
+                                        let col_type = cols[col_num as usize];
+                                        let col_value = match DataType::try_from((
+                                            col_type,
+                                            col_bytes.to_vec(),
+                                        )) {
+                                            Ok(value) => {
+                                                rainbow(&format!("{:}", value), col_num as usize)
+                                            }
+                                            Err(_) => "Error parsing value".on_red().to_string(),
+                                        };
+                                        pretty_row.push(col_value);
+                                        col_num += 1;
+                                        col_index = 0;
                                     } else {
-                                        format!("{:02X} ", byte.on_red())
+                                        col_index += 1;
                                     }
+                                    out
+                                } else {
+                                    format!("{:02X} ", byte.on_red())
                                 }
                             }
                         };
@@ -179,36 +172,45 @@ impl DumpFile for TableFile {
                             current_row = Some((row_bytes, col_num, col_index, cols));
                         }
                         out
+                    } else if offsets.contains(&(current_offset as u16)) {
+                        current_row = Some((vec![byte], 0, 0, vec![]));
+                        format!("{:02X} ", byte.blue())
                     } else {
-                        if offsets.contains(&(current_offset as u16)) {
-                            current_row = Some((vec![byte], 0, 0, vec![]));
-                            format!("{:02X} ", byte.blue())
-                        } else {
-                            format!("{:02X} ", byte.on_red().black())
-                        }
+                        format!("{:02X} ", byte.on_red().black())
                     }
                 } else if i * bytes_per_row + b as u32 >= content_start as u32
                     && PageType::from(page_type) == PageType::TableInterior
                 {
                     if let Some((ref row_bytes, _, _, _)) = current_row {
                         let current_row_index = row_bytes.len() as u8;
-                        let row_bytes = row_bytes.clone();
-                        let out = match current_row_index {
-                            1..=3 => {
-                                current_row = Some((row_bytes, 0, 0, vec![]));
+                        let mut row_bytes = row_bytes.clone();
+                        row_bytes.push(byte);
+
+                        current_row = Some((row_bytes.clone(), 0, 0, vec![]));
+                        match current_row_index {
+                            1..=2 => {
+                                format!("{:02X} ", byte.blue())
+                            }
+                            3 => {
+                                let row_id =
+                                    u32::from_le_bytes(row_bytes[0..4].try_into().unwrap());
+                                pretty_row.push(format!("(Child page: {:08X}", row_id.blue()));
                                 format!("{:02X} ", byte.blue())
                             }
                             4..=6 => {
-                                current_row = Some((row_bytes, 0, 0, vec![]));
                                 format!("{:02X} ", byte.yellow())
                             }
                             7 => {
+                                let row_id =
+                                    u32::from_le_bytes(row_bytes[4..8].try_into().unwrap());
+                                pretty_row.push(format!("Row id: {:08X})", row_id.yellow()));
                                 current_row = None;
                                 format!("{:02X} ", byte.yellow())
                             }
-                            _ => format!("{:02X} ", byte.on_red()),
-                        };
-                        out
+                            _ => {
+                                format!("{:02X} ", byte.on_red())
+                            }
+                        }
                     } else {
                         current_row = Some((vec![byte], 0, 0, vec![]));
                         format!("{:02X} ", byte.blue())
@@ -220,7 +222,5 @@ impl DumpFile for TableFile {
             }
             println!(" | {}", pretty_row.join(" "));
         }
-
-        Ok(())
     }
 }

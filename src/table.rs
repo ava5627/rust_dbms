@@ -2,20 +2,21 @@
 #![allow(unused_variables)]
 use crate::{constants::DataType, index_file::IndexFile, record::Record};
 
-struct Column {
-    name: String,
-    data_type: DataType,
-    nullable: bool,
+pub struct Column {
+    pub name: String,
+    pub data_type: DataType,
+    pub nullable: bool,
 }
 
 pub struct Table {
-    name: String,
-    columns: Vec<Column>,
-    path: String,
+    pub name: String,
+    pub columns: Vec<Column>,
+    pub path: String,
 }
 
 impl Table {
-    fn new(name: String, columns: Vec<Column>, path: String) -> Table {
+    /// Creates a new [`Table`].
+    pub fn new(name: String, columns: Vec<Column>, path: String) -> Table {
         Table {
             name,
             columns,
@@ -67,6 +68,10 @@ impl Table {
     }
 
     fn create_index(&self, column_name: String) -> bool {
+        todo!()
+    }
+
+    pub fn get_all_records(&self) -> Vec<Record> {
         todo!()
     }
 }

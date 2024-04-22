@@ -2,8 +2,8 @@ use std::fmt::Display;
 use DataType::*;
 extern crate chrono;
 
-use chrono::{DateTime as ChronoDateTime, NaiveDateTime, NaiveDate};
-use chrono::{Utc, NaiveTime};
+use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime};
+use chrono::{NaiveTime, Utc};
 
 pub const PAGE_SIZE: u64 = 512;
 
@@ -39,11 +39,6 @@ impl From<PageType> for u8 {
             _ => 0xFF,
         }
     }
-}
-
-pub enum FileType {
-    Table,
-    Index,
 }
 
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
@@ -106,7 +101,9 @@ impl DataType {
             }
             DataType::Time(_) => {
                 let time = NaiveTime::parse_from_str(value, "%H:%M:%S")?;
-                let seconds = time.signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0).unwrap()).num_seconds();
+                let seconds = time
+                    .signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                    .num_seconds();
                 DataType::Time(seconds as i32)
             }
             DataType::DateTime(_) => {
@@ -164,11 +161,37 @@ impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Null => write!(f, "NULL"),
-            TinyInt(_) | SmallInt(_) | Int(_) | BigInt(_) | Float(_) | Double(_) => write!(f, "{:?}", self),
-            DateTime(v) => write!(f, "{}", ChronoDateTime::<Utc>::from_timestamp(*v, 0).unwrap().format("%Y-%m-%d %H:%M:%S")),
-            Time(v) => write!(f, "{}", ChronoDateTime::<Utc>::from_timestamp(*v as i64, 0).unwrap().format("%H:%M:%S")),
-            Date(v) => write!(f, "{}", ChronoDateTime::<Utc>::from_timestamp(*v as i64, 0).unwrap().format("%Y-%m-%d")),
-            Year(v) => write!(f, "{}", NaiveDate::from_ymd_opt(2000 + *v as i32, 1, 1).unwrap().format("%Y")),
+            TinyInt(_) | SmallInt(_) | Int(_) | BigInt(_) | Float(_) | Double(_) => {
+                write!(f, "{:?}", self)
+            }
+            DateTime(v) => write!(
+                f,
+                "{}",
+                ChronoDateTime::<Utc>::from_timestamp(*v, 0)
+                    .unwrap()
+                    .format("%Y-%m-%d %H:%M:%S")
+            ),
+            Time(v) => write!(
+                f,
+                "{}",
+                ChronoDateTime::<Utc>::from_timestamp(*v as i64, 0)
+                    .unwrap()
+                    .format("%H:%M:%S")
+            ),
+            Date(v) => write!(
+                f,
+                "{}",
+                ChronoDateTime::<Utc>::from_timestamp(*v, 0)
+                    .unwrap()
+                    .format("%Y-%m-%d")
+            ),
+            Year(v) => write!(
+                f,
+                "{}",
+                NaiveDate::from_ymd_opt(2000 + *v as i32, 1, 1)
+                    .unwrap()
+                    .format("%Y")
+            ),
             Text(v) => write!(f, "{}", v),
             Unused => write!(f, "UNUSED"),
         }
@@ -201,7 +224,7 @@ impl TryFrom<(u8, Vec<u8>)> for DataType {
     fn try_from(value: (u8, Vec<u8>)) -> anyhow::Result<Self> {
         let data_type = DataType::from(value.0);
         let slice = value.1.as_slice();
-    Ok(match data_type {
+        Ok(match data_type {
             Null => Null,
             TinyInt(_) => TinyInt(i8::from_le_bytes(slice.try_into()?)),
             SmallInt(_) => SmallInt(i16::from_le_bytes(slice.try_into()?)),
@@ -235,12 +258,13 @@ mod test {
         assert_eq!(DataType::parse_str(Year(0), year_str).unwrap(), year);
         assert_eq!(DataType::parse_str(Time(0), time_str).unwrap(), time);
         assert_eq!(DataType::parse_str(Date(0), date_str).unwrap(), date);
-        assert_eq!(DataType::parse_str(DateTime(0), datetime_str).unwrap(), datetime);
+        assert_eq!(
+            DataType::parse_str(DateTime(0), datetime_str).unwrap(),
+            datetime
+        );
         assert_eq!("2010", format!("{}", year));
         assert_eq!("01:00:00", format!("{}", time));
         assert_eq!("2021-03-01", format!("{}", date));
         assert_eq!("2021-03-01 01:00:00", format!("{}", datetime));
     }
-
 }
-
