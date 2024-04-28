@@ -1,0 +1,9 @@
+{
+    "configurations": [
+        {
+            "name": "test",
+            "command": "cargo test",
+            "default": true
+        }
+    ]
+}

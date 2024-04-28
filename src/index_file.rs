@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 
@@ -11,13 +10,10 @@ use crate::{
     constants::{DataType, PageType},
     database_file::DatabaseFile,
     read_write_types::ReadWriteTypes,
-    table::Table,
 };
 
 pub struct IndexFile {
-    data_type: DataType,
     file: File,
-    column_index: usize,
 }
 
 impl DatabaseFile for IndexFile {
@@ -57,20 +53,16 @@ impl Seek for IndexFile {
 }
 
 impl IndexFile {
-    pub fn new(Table { name, columns, .. }: &Table, column_index: usize, dir: &str) -> Self {
-        let path = format!("{}/{}.{}.ndx", dir, name, columns[column_index].name);
+    pub fn new(table_name: &str, column_name: &str, dir: &str) -> Self {
+        let path = format!("{}/{}.{}.ndx", dir, table_name, column_name);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)
+            .truncate(false)
+            .open(path.clone())
             .expect("Error opening index file");
-        let data_type = columns[column_index].data_type.clone();
-        let mut idx = Self {
-            data_type,
-            file,
-            column_index,
-        };
+        let mut idx = Self { file };
         if idx.len() == 0 {
             idx.create_page(0xFFFFFFFF, PageType::IndexLeaf);
         }
@@ -297,26 +289,19 @@ impl IndexFile {
             .expect("Error writing zero bytes");
     }
 
-    fn initialize_index(&mut self, records: Vec<Record>) {
-        let mut values_and_ids: Vec<(DataType, Vec<u32>)> = records
-            .iter()
-            .map(|record| {
-                let value = record.values[self.column_index].clone();
-                let id = record.row_id;
-                (value, id)
-            })
-            .fold(
-                Vec::new(),
-                |mut acc: Vec<(DataType, Vec<u32>)>, (value, id)| {
-                    let idx = acc.iter().position(|(v, _)| v == &value);
-                    if let Some(idx) = idx {
-                        acc[idx].1.push(id);
-                    } else {
-                        acc.push((value, vec![id]));
-                    }
-                    acc
-                },
-            );
+    pub fn initialize_index(&mut self, values: Vec<Record>, column_index: usize) {
+        let mut values_and_ids: Vec<(DataType, Vec<u32>)> =
+            values.iter().fold(Vec::new(), |mut acc, r| {
+                let id = r.row_id;
+                let value = &r.values[column_index];
+                let idx = acc.iter().position(|(v, _)| v == value);
+                if let Some(idx) = idx {
+                    acc[idx].1.push(id);
+                } else {
+                    acc.push((value.clone(), vec![id]));
+                }
+                acc
+            });
         values_and_ids.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap());
         for (value, ids) in values_and_ids {
             let page = match self.find_value(&value) {
@@ -380,12 +365,12 @@ impl IndexFile {
             .expect("Error writing row IDs");
     }
 
-    fn update_record(&mut self, row_id: u32, old_value: &DataType, new_value: &DataType) {
+    pub fn update_record(&mut self, row_id: u32, old_value: &DataType, new_value: &DataType) {
         self.remove_item_from_cell(row_id, old_value);
         self.insert_item_into_cell(row_id, new_value);
     }
 
-    fn remove_item_from_cell(&mut self, row_id: u32, value: &DataType) {
+    pub fn remove_item_from_cell(&mut self, row_id: u32, value: &DataType) {
         let (page, index) = self
             .find_value(value)
             .expect("Cannot remove item that does not exist");
@@ -445,7 +430,7 @@ impl IndexFile {
         self.seek_to_page_offset(page, offset);
     }
 
-    fn insert_item_into_cell(&mut self, row_id: u32, new_value: &DataType) {
+    pub fn insert_item_into_cell(&mut self, row_id: u32, new_value: &DataType) {
         let (mut page, mut index) = match self.find_value(new_value) {
             Ok((p, i)) => (p, i as i32),
             Err((p, _)) => {
@@ -555,7 +540,7 @@ impl IndexFile {
         row_ids
     }
 
-    fn search(&mut self, value: &DataType, operator: &str) -> Vec<u32> {
+    pub fn search(&mut self, value: &DataType, operator: &str) -> Vec<u32> {
         let pos = self.find_value(value);
         let (page, index, exists) = match pos {
             Ok((p, i)) => (p, i, true),
@@ -588,6 +573,10 @@ impl IndexFile {
 
     pub fn print(&mut self) {
         let num_pages = self.len() / PAGE_SIZE;
+        if num_pages == 0 {
+            println!("Empty index file");
+            return;
+        }
         for i in 0..num_pages {
             self.print_page(i as u32);
         }
@@ -673,110 +662,34 @@ impl IndexFile {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        fs::{remove_file, File},
-        io::BufRead,
-    };
-
-    use crate::{
-        constants::DataType,
-        record::Record,
-        table::{Column, Table},
-        table_file::TableFile,
-    };
+    use crate::constants::DataType;
+    use crate::utils::{setup_records, setup_table, teardown};
 
     use super::*;
 
-    fn setup(test_name: &str, test_file_path: &str, col_index: usize) -> IndexFile {
-        let file_name = format!("data/{}.tbl", test_name);
-        if std::path::Path::new(&file_name).exists() {
-            remove_file(file_name).expect("Error removing test table file");
-        }
-        let _table_file = TableFile::new(test_name, "data");
-        let records = setup_records(test_file_path);
-        let column_names = (0..4)
-            .map(|i| format!("column_{}", i))
-            .collect::<Vec<String>>();
-        let nullable = vec![true; 4];
-        let columns = records[0]
-            .values
-            .clone()
-            .into_iter()
-            .zip(column_names)
-            .zip(nullable)
-            .map(|((data_type, name), nullable)| Column {
-                name,
-                data_type,
-                nullable,
-            })
-            .collect::<Vec<Column>>();
-        let col_name = columns[col_index].name.clone();
-        let table = Table::new(test_name.to_string(), columns, "data".to_string());
-        let file_name = format!("data/{}.{}.ndx", test_name, col_name);
-        if std::path::Path::new(&file_name).exists() {
-            remove_file(file_name).expect("Error removing test index file");
-        }
-
-        IndexFile::new(&table, col_index, "data")
+    fn setup_index_file(test_name: &str) -> IndexFile {
+        setup(test_name, 1, "data/testdata.txt")
     }
 
-    fn setup_records(test_file_path: &str) -> Vec<Record> {
-        let columns = vec![
-            DataType::Text("".to_string()),
-            DataType::Text("".to_string()),
-            DataType::Int(0),
-            DataType::Text("".to_string()),
-        ];
-        let mut records = vec![];
-        let test_file = File::open(test_file_path).expect("Error opening test data file");
-        let test_data = std::io::BufReader::new(test_file);
-        for (i, line) in test_data.lines().enumerate() {
-            let line = line.expect("Error reading line");
-            let str_values: Vec<&str> = line.split(';').collect();
-            let mut values = vec![];
-            for (j, value) in str_values.iter().enumerate() {
-                let v = match DataType::parse_str(columns[j].clone(), value) {
-                    Ok(v) => v,
-                    Err(e) => panic!("Error parsing value: {}", e),
-                };
-                values.push(v);
-            }
-            let record = Record::new(values, i as u32);
-            records.push(record);
-        }
-        records
-    }
-
-    fn setup_index_file(test_index_name: &str) -> IndexFile {
-        let mut index_file = setup(test_index_name, "data/testdata.txt", 1);
-        let records = setup_records("data/testdata.txt");
-        index_file.initialize_index(records);
+    fn setup(test_name: &str, col_index: usize, test_data: &str) -> IndexFile {
+        let table = setup_table(test_name, test_data);
+        let mut index_file = IndexFile::new(test_name, &table.columns[col_index].name, "data/test");
+        index_file.initialize_index(setup_records(test_data), col_index);
         index_file
     }
 
-    fn teardown(test_index_name: &str, col_index: usize) {
-        let file_name = format!("data/{}.tbl", test_index_name);
-        if std::path::Path::new(&file_name).exists() {
-            remove_file(file_name).expect("Error removing test table file");
-        }
-        let file_name = format!("data/{}.column_{}.ndx", test_index_name, col_index);
-        if std::path::Path::new(&file_name).exists() {
-            remove_file(file_name).expect("Error removing test index file");
-        }
-    }
-
-    fn teardown_index_file(test_index_name: &str) {
-        teardown(test_index_name, 1);
+    fn setup_uninitialized(test_name: &str, col_index: usize) -> IndexFile {
+        let table = setup_table(test_name, "data/testdata.txt");
+        IndexFile::new(test_name, &table.columns[col_index].name, "data/test")
     }
 
     #[test]
     fn test_initialize_index() {
         let col_index = 1;
-        let mut index_file = setup("test_initialize_index", "data/testdata.txt", col_index);
+        let mut index_file = setup_uninitialized("test_initialize_index", col_index);
         let records = setup_records("data/testdata.txt");
-        index_file.initialize_index(records);
-        index_file.print();
-        teardown("test_initialize_index", col_index);
+        index_file.initialize_index(records, col_index);
+        teardown("test_initialize_index");
     }
 
     #[test]
@@ -798,7 +711,7 @@ mod test {
             "=",
         );
         assert_eq!(0, search_result.len());
-        teardown_index_file("test_index_update");
+        teardown("test_index_update");
     }
 
     #[test]
@@ -809,14 +722,14 @@ mod test {
         index_file.remove_item_from_cell(9, &value);
         let search_result = index_file.search(&value, "=");
         assert_eq!(0, search_result.len());
-        teardown_index_file("test_index_remove_item_from_cell");
+        teardown("test_index_remove_item_from_cell");
         let mut index_file = setup_index_file("test_index_remove_item_from_cell");
         index_file.insert_item_into_cell(10, &value);
         index_file.remove_item_from_cell(9, &value);
         let search_result = index_file.search(&value, "=");
         assert_eq!(1, search_result.len());
         assert_eq!(10, search_result[0]);
-        teardown_index_file("test_index_remove_item_from_cell");
+        teardown("test_index_remove_item_from_cell");
     }
 
     #[test]
@@ -831,7 +744,7 @@ mod test {
         assert_eq!(9, search_result[0]);
         assert_eq!(10, search_result[1]);
         assert_eq!(11, search_result[2]);
-        teardown_index_file("test_index_add_item_to_cell");
+        teardown("test_index_add_item_to_cell");
     }
 
     #[test]
@@ -850,7 +763,7 @@ mod test {
             assert_eq!(2, page);
             assert_eq!(4, index);
         }
-        teardown_index_file("test_index_find_value");
+        teardown("test_index_find_value");
     }
 
     #[test]
@@ -876,14 +789,13 @@ mod test {
             DataType::Text("ZEndOfAlphabet St 176, Summerholm, Guadeloupe, 673843".to_string());
         let search_result = index_file.search(&non_existent_value, "=");
         assert_eq!(0, search_result.len());
-        teardown_index_file("test_index_search");
+        teardown("test_index_search");
     }
 
     #[test]
     fn test_index_long_file() {
-        let mut index_file = setup("test_index_long_file", "data/longdata.txt", 2);
-        let records = setup_records("data/longdata.txt");
-        index_file.initialize_index(records);
-        teardown("test_index_long_file", 2);
+        let index_file = setup("test_index_long_file", 2, "data/longdata.txt");
+        assert_ne!(10, index_file.len() / PAGE_SIZE);
+        teardown("test_index_long_file");
     }
 }

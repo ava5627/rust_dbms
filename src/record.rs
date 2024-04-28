@@ -39,6 +39,22 @@ impl Record {
             _ => unreachable!("Invalid operator"),
         }
     }
+
+    pub fn column_widths(&self) -> Vec<usize> {
+        self.values.iter().map(|v| format!("{}", v).len()).collect()
+    }
+
+    pub fn print_columns(&self, columns: &[usize], widths: &[usize]) -> String {
+        if columns.len() != widths.len() {
+            panic!("Columns and widths must have the same length");
+        }
+        let mut result = String::new();
+        for (column, w) in columns.iter().zip(widths.iter()) {
+            // print!("{:width$} ", self.values[*column], width = *w);
+            result.push_str(&format!("{:width$} ", self.values[*column], width = *w));
+        }
+        result
+    }
 }
 
 impl Display for Record {

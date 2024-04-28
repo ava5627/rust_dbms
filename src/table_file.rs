@@ -1,6 +1,5 @@
-#![allow(dead_code)]
 use std::cmp::max;
-use std::fmt::Write as _;
+use std::fmt::{Debug, Write as _};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -60,6 +59,7 @@ impl TableFile {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)
             .expect("Error opening table file");
         let mut table_file = TableFile { file };
@@ -84,10 +84,10 @@ impl TableFile {
         self.read_u32()
     }
 
-    fn get_last_row_id(&mut self) -> u32 {
+    pub fn get_last_row_id(&mut self) -> u32 {
         let page = self.get_last_leaf_page();
         if self.get_num_cells(page) == 0 {
-            panic!("Page {} has no cells", page);
+            return 0;
         }
         let page_type = self.get_page_type(page);
         let offset = self.get_content_start(page);
@@ -161,16 +161,16 @@ impl TableFile {
         }
     }
 
-    fn append_record(&mut self, record: Record) {
+    pub fn append_record(&mut self, record: Record) {
         let page = self.get_last_leaf_page();
         self.write_record(record, page);
     }
 
-    fn update_record(&mut self, row_id: u32, column_id: u32, value: DataType) {
+    pub fn update_record(&mut self, row_id: u32, column_index: u32, value: DataType) {
         let (mut page, mut index) = self.find_record(row_id).expect("Record not found");
         let mut offset = self.get_cell_offset(page, index);
         let mut record = self.read_record(page, offset);
-        if let DataType::Text(v) = &record.values[column_id as usize] {
+        if let DataType::Text(v) = &record.values[column_index as usize] {
             let old_size = v.as_bytes().len() as u16;
             let value_text = match value {
                 DataType::Text(ref v) => v,
@@ -184,7 +184,7 @@ impl TableFile {
             self.shift_cells(page, index as i32 - 1, new_size as i32 - old_size as i32, 0);
             offset = self.get_cell_offset(page, index);
         }
-        record.values[column_id as usize] = value;
+        record.values[column_index as usize] = value;
         let new_record = Record::new(record.values, row_id);
         // 0x06 is the offset of the right most child pointer
         self.seek_to_page_offset(page, offset + 0x06);
@@ -195,7 +195,7 @@ impl TableFile {
         }
     }
 
-    fn delete_record(&mut self, row_id: u32) {
+    pub fn delete_record(&mut self, row_id: u32) {
         let (page, index) = self.find_record(row_id).expect("Record not found");
         let offset = self.get_cell_offset(page, index);
         self.seek_to_page_offset(page, offset);
@@ -233,6 +233,12 @@ impl TableFile {
     }
 
     fn get_last_leaf_page(&mut self) -> u32 {
+        if self.len() < PAGE_SIZE {
+            panic!("Table file is empty");
+        }
+        if self.len() == PAGE_SIZE {
+            return 0;
+        }
         let mut next_page = self.get_root_page();
         loop {
             let page_type = self.get_page_type(next_page);
@@ -246,7 +252,7 @@ impl TableFile {
         next_page
     }
 
-    fn get_record(&mut self, row_id: u32) -> Option<Record> {
+    pub fn get_record(&mut self, row_id: u32) -> Option<Record> {
         let (page, index) = match self.find_record(row_id) {
             Some((page, index)) => (page, index),
             None => return None,
@@ -321,7 +327,12 @@ impl TableFile {
         Record::new(values, row_id)
     }
 
-    fn search(&mut self, column_id: u32, value: DataType, operator: &str) -> Vec<Record> {
+    pub fn search(
+        &mut self,
+        column_id: Option<u32>,
+        value: DataType,
+        operator: &str,
+    ) -> Vec<Record> {
         let mut records = vec![];
         let mut current_page = self.get_root_page();
         let mut page_type = self.get_page_type(current_page);
@@ -336,10 +347,13 @@ impl TableFile {
             self.seek_to_page(current_page);
             let num_cells = self.get_num_cells(current_page);
             for i in 0..num_cells {
-                self.seek_to_page_offset(current_page, 0x10 + i * 2);
                 let offset = self.get_cell_offset(current_page, i);
                 let record = self.read_record(current_page, offset);
-                if record.compare_column(column_id as usize, &value, operator) {
+                if let Some(column_index) = column_id {
+                    if record.compare_column(column_index as usize, &value, operator) {
+                        records.push(record);
+                    }
+                } else {
                     records.push(record);
                 }
             }
@@ -563,6 +577,12 @@ impl TableFile {
     }
 }
 
+impl Debug for TableFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TableFile")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::constants::PageType;
@@ -584,7 +604,7 @@ mod tests {
             remove_file(file_name).expect("Error removing test table file");
         }
         let table_file = TableFile::new(test_name, "data");
-        let columns = vec![
+        let columns = [
             DataType::Text("".to_string()),
             DataType::Text("".to_string()),
             DataType::Int(0),
@@ -731,7 +751,7 @@ mod tests {
         table_file.delete_record(2);
         let should_not_exist = table_file.get_record(2);
         assert!(should_not_exist.is_none());
-        let serch_result = table_file.search(2, DataType::Int(9800), "=");
+        let serch_result = table_file.search(Some(2), DataType::Int(9800), "=");
         assert_eq!(0, serch_result.len());
         tear_down("test_delete_record");
     }
@@ -747,7 +767,7 @@ mod tests {
         for record in &records {
             table_file.append_record(record.clone());
         }
-        let search_results = table_file.search(2, search_value, ">=");
+        let search_results = table_file.search(Some(2), search_value, ">=");
         assert_eq!(real_results.len(), search_results.len());
         for (real_result, search_result) in real_results.iter().zip(search_results.iter()) {
             assert_eq!(*real_result, search_result);
@@ -780,7 +800,7 @@ mod tests {
         }
         assert_eq!(table_file.get_last_leaf_page(), 0x9D);
         assert_eq!(table_file.get_root_page(), 0x33);
-        let search_results = table_file.search(2, DataType::Int(800), "<>");
+        let search_results = table_file.search(Some(2), DataType::Int(800), "<>");
         assert_eq!(1000, search_results.len());
         tear_down("test_long_file");
     }

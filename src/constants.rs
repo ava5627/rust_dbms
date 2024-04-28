@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::str::FromStr;
 use DataType::*;
 extern crate chrono;
 
@@ -6,6 +7,18 @@ use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime};
 use chrono::{NaiveTime, Utc};
 
 pub const PAGE_SIZE: u64 = 512;
+#[cfg(not(test))]
+pub const SYSTEM_DIR: &str = "data/system";
+#[cfg(test)]
+pub const SYSTEM_DIR: &str = "data/test/system";
+#[cfg(not(test))]
+pub const USER_DIR: &str = "data/user";
+#[cfg(test)]
+pub const USER_DIR: &str = "data/test/user";
+pub const TABLE_TABLE: &str = "meta_tables";
+pub const COLUMN_TABLE: &str = "meta_columns";
+
+pub const PROMPT: &str = "db > ";
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PageType {
@@ -86,32 +99,61 @@ impl DataType {
         }
     }
 
-    pub fn parse_str(data_type: DataType, value: &str) -> anyhow::Result<DataType> {
+    pub fn parse_str(data_type: DataType, value: &str) -> Result<DataType, String> {
         let value = value.trim();
         let pared = match data_type {
-            DataType::TinyInt(_) => DataType::TinyInt(value.parse()?),
-            DataType::SmallInt(_) => DataType::SmallInt(value.parse()?),
-            DataType::Int(_) => DataType::Int(value.parse()?),
-            DataType::BigInt(_) => DataType::BigInt(value.parse()?),
-            DataType::Float(_) => DataType::Float(value.parse()?),
-            DataType::Double(_) => DataType::Double(value.parse()?),
+            DataType::TinyInt(_) => DataType::TinyInt(
+                value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
+            ),
+            DataType::SmallInt(_) => DataType::SmallInt(
+                value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
+            ),
+            DataType::Int(_) => DataType::Int(
+                value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
+            ),
+            DataType::BigInt(_) => DataType::BigInt(
+                value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
+            ),
+            DataType::Float(_) => DataType::Float(
+                value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
+            ),
+            DataType::Double(_) => DataType::Double(
+                value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
+            ),
             DataType::Year(_) => {
-                let year: i32 = value.parse()?;
+                let year: i32 = value
+                    .parse()
+                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
                 DataType::Year((year - 2000) as i8)
             }
             DataType::Time(_) => {
-                let time = NaiveTime::parse_from_str(value, "%H:%M:%S")?;
+                let time = NaiveTime::parse_from_str(value, "%H:%M:%S")
+                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
                 let seconds = time
                     .signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
                     .num_seconds();
                 DataType::Time(seconds as i32)
             }
             DataType::DateTime(_) => {
-                let second = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")?;
+                let second = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
                 DataType::DateTime(second.and_utc().timestamp())
             }
             DataType::Date(_) => {
-                let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")?;
+                let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
                 DataType::Date(date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
             }
             DataType::Text(_) => DataType::Text(value.to_string()),
@@ -161,9 +203,12 @@ impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Null => write!(f, "NULL"),
-            TinyInt(_) | SmallInt(_) | Int(_) | BigInt(_) | Float(_) | Double(_) => {
-                write!(f, "{:?}", self)
-            }
+            TinyInt(v) => write!(f, "{}", v),
+            SmallInt(v) => write!(f, "{}", v),
+            Int(v) => write!(f, "{}", v),
+            BigInt(v) => write!(f, "{}", v),
+            Float(v) => write!(f, "{}", v),
+            Double(v) => write!(f, "{}", v),
             DateTime(v) => write!(
                 f,
                 "{}",
@@ -239,6 +284,27 @@ impl TryFrom<(u8, Vec<u8>)> for DataType {
             Date(_) => Date(i64::from_le_bytes(slice.try_into()?)),
             Text(_) => Text(String::from_utf8(slice.to_vec())?),
         })
+    }
+}
+
+impl FromStr for DataType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "tinyint" => Ok(DataType::TinyInt(0)),
+            "smallint" => Ok(DataType::SmallInt(0)),
+            "int" => Ok(DataType::Int(0)),
+            "bigint" => Ok(DataType::BigInt(0)),
+            "float" => Ok(DataType::Float(0.0)),
+            "double" => Ok(DataType::Double(0.0)),
+            "year" => Ok(DataType::Year(0)),
+            "time" => Ok(DataType::Time(0)),
+            "datetime" => Ok(DataType::DateTime(0)),
+            "date" => Ok(DataType::Date(0)),
+            "text" => Ok(DataType::Text("".to_string())),
+            _ => Err("Invalid DataType".to_string()),
+        }
     }
 }
 
