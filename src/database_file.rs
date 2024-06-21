@@ -15,6 +15,12 @@ pub trait DatabaseFile: Read + Write + Seek + ReadWriteTypes {
     }
 
     fn seek_to_page_offset(&mut self, page: u32, offset: u16) -> u64 {
+        if offset as u64 >= PAGE_SIZE {
+            panic!("Offset {} larger than page size ({})", offset, PAGE_SIZE);
+        }
+        if page as u64 >= self.len() / PAGE_SIZE {
+            panic!("Page {} out of bounds ({})", page, self.len() / PAGE_SIZE - 1);
+        }
         self.seek(SeekFrom::Start(page as u64 * PAGE_SIZE + offset as u64))
             .expect("Failed to seek to page offset")
     }
@@ -96,6 +102,7 @@ pub trait DatabaseFile: Read + Write + Seek + ReadWriteTypes {
     }
 
     fn get_cell_offset(&mut self, page: u32, cell_num: u16) -> u16 {
+        assert!(cell_num < self.get_num_cells(page));
         let offset = 0x10 + 2 * cell_num;
         self.seek_to_page_offset(page, offset);
         self.read_u16()
@@ -158,7 +165,7 @@ pub trait DatabaseFile: Read + Write + Seek + ReadWriteTypes {
         let content_offset = self.set_content_start(page, shift);
 
         if content_offset == PAGE_SIZE as u16 {
-            return PAGE_SIZE as u32 - shift as u32;
+            return (PAGE_SIZE as i32 - shift) as u32;
         }
 
         let start_offset = if preceding_cell >= 0 {

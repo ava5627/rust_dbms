@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 
@@ -11,6 +13,24 @@ use crate::{
     database_file::DatabaseFile,
     read_write_types::ReadWriteTypes,
 };
+/// Indexfile page structure:
+/// Header: 0x00-0x0F
+///     * 0x00-0x00: Page type
+///     * 0x01-0x01: Unused space
+///     * 0x02-0x03: Number of cells
+///     * 0x04-0x05: Start of content area
+///     * 0x06-0x09: Rightmost child page
+///     * 0x0A-0x0D: Parent page
+///     * 0x0E-0x0F: Unused
+/// Cell offsets: 0x10-0x1F
+///     * 2-byte offsets to the start of each cell
+/// Cells:
+///     * Child page: 4-bytes, pointer to the child page, interior index pages only
+///     * Payload size: 2-bytes, size in bytes of cell excluding child page and payload size
+///     * Number of row IDs: 1-byte, number of row IDs
+///     * Payload type: 1-byte, data type of the payload
+///     * value: Variable length, the value of the cell
+///     * Row IDs: 4-bytes each, row IDs with the value
 
 pub struct IndexFile {
     file: File,
@@ -129,21 +149,18 @@ impl IndexFile {
         (Some(value), child_page, row_ids)
     }
 
+    pub fn read_full_index_value_index(
+        &mut self,
+        page: u32,
+        index: u16,
+    ) -> (Option<DataType>, Option<u32>, Vec<u32>) {
+        let offset = self.get_cell_offset(page, index);
+        self.read_full_index_value(page, offset)
+    }
+
     pub fn create_interior_page(&mut self, parent: u32, child: u32) -> u32 {
         let page = self.create_page(parent, PageType::IndexInterior);
-
-        self.seek_to_page_offset(page, 0x02);
-        self.write_u16(1); // Set the number of cells to 1
-        self.write_u16(PAGE_SIZE as u16 - 6); // Set the start of the content area
-        self.write_u32(child); // Set pointer to the rightmost child page
-
-        self.seek_to_page_offset(page, 0x10);
-        self.write_u16(PAGE_SIZE as u16 - 6); // Set the offset of the first cell
-
-        // Pointer to the leftmost page has no corresponding cell payload
-        self.seek_to_page_offset(page, PAGE_SIZE as u16 - 6);
-        self.write_u32(child); // Set the leftmost child page
-        self.write_u8(0x00); // Set the payload size to 0
+        self.set_rightmost_child(page, child);
         page
     }
 
@@ -174,12 +191,7 @@ impl IndexFile {
         self.write_cell(parent_page, &value, row_ids, new_page);
 
         self.seek_to_page_offset(page, middle_offset);
-        let cell_size = self.payload_size(&value, num_row_ids)
-            + 2
-            + match page_type {
-                PageType::IndexInterior => 4,
-                _ => 0,
-            };
+        let cell_size = self.cell_size(&value, num_row_ids, page_type);
         let zero_bytes = vec![0; cell_size as usize];
         self.write_all(&zero_bytes)
             .expect("Error writing zero bytes");
@@ -249,8 +261,8 @@ impl IndexFile {
             .expect("Error reading cell offsets");
 
         // Overwrite the cells to be moved with zero bytes
-        let zero_bytes = vec![0; cell_bytes.len()];
-        self.seek_to_page_offset(destination_page, offset_location);
+        let zero_bytes = vec![0; (cell_offset - content_start) as usize];
+        self.seek_to_page_offset(source_page, content_start);
         self.write_all(&zero_bytes)
             .expect("Error writing zero bytes");
 
@@ -283,8 +295,8 @@ impl IndexFile {
         self.write_u16(preceding_cell);
 
         // Fill the moved offsets with zero bytes
-        let zero_bytes = vec![0; (cell_offset - content_start) as usize];
-        self.seek_to_page_offset(source_page, content_start);
+        let zero_bytes = vec![0; cell_offsets.len()];
+        self.seek_to_page_offset(source_page, offset_location);
         self.write_all(&zero_bytes)
             .expect("Error writing zero bytes");
     }
@@ -315,13 +327,7 @@ impl IndexFile {
     fn write_cell(&mut self, page: u32, value: &DataType, row_ids: Vec<u32>, child_page: u32) {
         let page_type = self.get_page_type(page);
         let payload_size = self.payload_size(value, row_ids.len());
-        let cell_size = payload_size
-            + 2
-            + if page_type == PageType::IndexInterior {
-                4
-            } else {
-                0
-            };
+        let cell_size = self.cell_size(value, row_ids.len(), page_type);
 
         let page = if self.should_split(page, cell_size as i32) {
             self.split_page(page, value)
@@ -398,36 +404,240 @@ impl IndexFile {
             .collect::<Vec<u8>>();
         self.write_all(&row_ids_bytes)
             .expect("Error writing row IDs");
-        self.shift_cells(page, index as i32, -4, 0);
+        self.shift_cells(page, index as i32 - 1, -4, 0);
 
         if row_ids.is_empty() {
-            self.remove_cell(page, index);
+            self.remove_cell(page, index, true);
         }
     }
 
-    fn remove_cell(&mut self, page: u32, index: u16) {
-        let offset = self.get_cell_offset(page, index);
-        let (_, _, row_ids) = self.read_full_index_value(page, offset);
-        if !row_ids.is_empty() {
-            panic!("Cannot remove cell with row IDs");
-        }
-        // TODO: Remove cell from page
+    fn remove_cell(&mut self, page: u32, index: u16, steal: bool) {
         let page_type = self.get_page_type(page);
-        match page_type {
-            PageType::IndexInterior => self.remove_cell_from_interior(page, index),
-            PageType::IndexLeaf => self.remove_cell_from_leaf(page, index),
-            _ => unreachable!("Index pages must be either IndexInterior or IndexLeaf"),
+        let offset = self.get_cell_offset(page, index);
+        let (value, child_page, _) = self.read_full_index_value(page, offset);
+        self.seek_to_page_offset(page, offset);
+        if page_type == PageType::IndexInterior {
+            self.skip_bytes(4);
+        }
+        let cell_size = (self.read_u16()
+            + 2
+            + match page_type {
+                PageType::IndexInterior => 4,
+                _ => 0,
+            }) as i32;
+
+        self.shift_cells(page, index as i32 - 1, -cell_size, -1);
+        let num_cells = self.get_num_cells(page) - 1;
+        self.seek_to_page_offset(page, 0x02); // Number of cells
+        self.write_u16(num_cells);
+        let content_start = self.get_content_start(page);
+        let cell_pointer_list_end = 0x10 + num_cells * 2;
+        self.seek_to_page_offset(page, cell_pointer_list_end);
+        let zero_bytes = vec![0; (content_start - cell_pointer_list_end) as usize];
+        self.write_all(&zero_bytes)
+            .expect("Error writing zero bytes");
+
+        if page_type == PageType::IndexInterior && steal {
+            let (_, child_to_steal_from, _) = self.read_full_index_value_index(page, index - 1);
+            self.steal_from_child(page, child_to_steal_from.unwrap(), child_page.unwrap());
+        } else if page_type == PageType::IndexLeaf && num_cells == 0 {
+            self.remove_page(page, None);
         }
     }
 
-    fn remove_cell_from_interior(&mut self, page: u32, index: u16) {
-        let offset = self.get_cell_offset(page, index);
-        self.seek_to_page_offset(page, offset);
+    fn remove_page(&mut self, page: u32, child: Option<u32>) {
+        let parent_page = self.get_parent_page(page);
+        if parent_page == 0xFFFFFFFF && child.is_none() {
+            let rightmost_child = self.get_rightmost_child(page);
+            self.seek_to_page_offset(rightmost_child, 0x0A);
+            self.write_u32(0xFFFFFFFF);
+            self.delete_page(page);
+            return;
+        }
+        let index = self.find_page_pointer_index(parent_page, page);
+        if let Some(right) = self.right_sibling(page) {
+            match self.get_num_cells(right) {
+                0 => panic!("Right sibling ({}) of {} has no cells: {}", right, page, self.get_num_cells(right)),
+                2.. => self.steal_from_sibling(page, right, true),
+                1 => {
+                    self.merge_pages(parent_page, right, page, true);
+                    self.set_rightmost_child(parent_page, right);
+                    self.delete_page(page);
+                    if self.get_num_cells(parent_page) == 1 {
+                        self.remove_page(parent_page, None);
+                    }
+                }
+            }
+        } else if let Some(left) = self.left_sibling(page) {
+            match self.get_num_cells(left) {
+                0 => panic!("Left sibling ({}) of {} has no cells: {}", left, page, self.get_num_cells(left)),
+                2.. => self.steal_from_sibling(page, left, false),
+                1 => {
+                    self.merge_pages(parent_page, left, page, false);
+                    self.delete_page(page);
+                    if self.get_num_cells(parent_page) == 1 {
+                        self.remove_page(parent_page, None);
+                    }
+                }
+            }
+        } else {
+            panic!(
+                "Page has no siblings: {} {}",
+                page,
+                self.get_num_cells(page)
+            );
+        }
     }
 
-    fn remove_cell_from_leaf(&mut self, page: u32, index: u16) {
-        let offset = self.get_cell_offset(page, index);
-        self.seek_to_page_offset(page, offset);
+    fn delete_page(&mut self, page: u32) {
+        if self.len() == (page + 1) as u64 * PAGE_SIZE {
+            self.set_len(self.len() - PAGE_SIZE);
+            return;
+        }
+        let num_pages = (self.len() / PAGE_SIZE) as u32;
+        let mut last_page_bytes = vec![0; PAGE_SIZE as usize];
+        self.update_page_number(num_pages - 1, page);
+        self.seek_to_page_offset(num_pages - 1, 0);
+        self.read_exact(&mut last_page_bytes)
+            .expect("Error reading following bytes");
+        self.seek_to_page_offset(page, 0);
+        self.write_all(&last_page_bytes)
+            .expect("Error writing zero bytes");
+        self.set_len(self.len() - PAGE_SIZE);
+    }
+
+    fn update_page_number(&mut self, old_page: u32, new_page: u32) {
+        let parent_page = self.get_parent_page(old_page);
+        let index = self.find_page_pointer_index(parent_page, old_page);
+        if index == 0 {
+            self.set_rightmost_child(parent_page, new_page);
+            return;
+        }
+        let offset = self.get_cell_offset(parent_page, index);
+        self.seek_to_page_offset(parent_page, offset);
+        self.write_u32(new_page);
+    }
+
+    fn right_sibling(&mut self, page: u32) -> Option<u32> {
+        let parent_page = self.get_parent_page(page);
+        let num_cells = self.get_num_cells(parent_page);
+        let index = self.find_page_pointer_index(parent_page, page);
+        if index < num_cells - 1 {
+            let offset = self.get_cell_offset(parent_page, index + 1);
+            let (_, child, _) = self.read_full_index_value(parent_page, offset);
+            child
+        } else {
+            None
+        }
+    }
+
+    fn left_sibling(&mut self, page: u32) -> Option<u32> {
+        let parent_page = self.get_parent_page(page);
+        let index = self.find_page_pointer_index(parent_page, page);
+        if index > 0 {
+            let offset = self.get_cell_offset(parent_page, index - 1);
+            let (_, child, _) = self.read_full_index_value(parent_page, offset);
+            child
+        } else {
+            None
+        }
+    }
+
+    fn get_rightmost_child(&mut self, page: u32) -> u32 {
+        self.seek_to_page_offset(page, 6);
+        self.read_u32()
+    }
+
+    fn steal_from_sibling(&mut self, page: u32, sibling: u32, right: bool) {
+        if self.get_page_type(page) != PageType::IndexLeaf {
+            unimplemented!("Stealing from interior pages not yet implemented");
+        }
+        if self.get_num_cells(page) != 0 {
+            panic!("Page must be empty to steal from sibling");
+        }
+        let parent_page = self.get_parent_page(page);
+        let index = match right {
+            false => self.find_page_pointer_index(parent_page, page),
+            true => self.find_page_pointer_index(parent_page, sibling),
+        };
+        let (value, _, row_ids) = self.read_full_index_value_index(parent_page, index);
+        let value = value.unwrap();
+        self.remove_cell(parent_page, index, false);
+
+        let num_cells = self.get_num_cells(sibling);
+        let sibling_index = if right { 0 } else { num_cells - 1 };
+        if num_cells < 2 {
+            panic!("Sibling {} has too few cells {} to steal from", sibling, num_cells);
+        }
+        let (sibling_value, _, sibling_row_ids) =
+            self.read_full_index_value_index(sibling, sibling_index);
+        let sibling_value = sibling_value.unwrap();
+        self.remove_cell(sibling, sibling_index, false);
+
+        self.write_cell(page, &value, row_ids, 0xFFFFFFFF);
+        if right {
+            self.write_cell(parent_page, &sibling_value, sibling_row_ids, sibling);
+        } else {
+            self.write_cell(parent_page, &sibling_value, sibling_row_ids, page);
+        }
+    }
+
+    fn steal_from_child(&mut self, parent: u32, child_to_steal_from: u32, child: u32) {
+        let num_cells = self.get_num_cells(child_to_steal_from);
+        if num_cells < 1 {
+            panic!("Child page must have at least one cell to steal");
+        }
+        let index = num_cells - 1;
+        let offset = self.get_cell_offset(child_to_steal_from, index);
+        let (value, _, row_ids) = self.read_full_index_value(child_to_steal_from, offset);
+        let value = value.unwrap();
+        self.write_cell(parent, &value, row_ids, child);
+        self.remove_cell(child_to_steal_from, index, true);
+    }
+
+    fn set_rightmost_child(&mut self, page: u32, child: u32) {
+        if self.get_num_cells(page) == 0 {
+            self.seek_to_page_offset(page, 0x02);
+            self.write_u16(1); // Set the number of cells to 1
+            self.write_u16(PAGE_SIZE as u16 - 6); // Set the start of the content area
+            self.seek_to_page_offset(page, 0x10);
+            self.write_u16(PAGE_SIZE as u16 - 6); // Set the offset of the first cell
+        }
+        self.seek_to_page_offset(page, PAGE_SIZE as u16 - 6);
+        self.write_u32(child);
+        self.seek_to_page_offset(page, 0x6);
+        self.write_u32(child);
+    }
+
+    fn merge_pages(&mut self, parent: u32, merge: u32, deleted: u32, right: bool) {
+        if self.get_num_cells(merge) != 1 {
+            panic!(
+                "Child page must have only one cell to merge, found: {}",
+                self.get_num_cells(merge)
+            );
+        }
+        let index = match right {
+            true => self.find_page_pointer_index(parent, merge),
+            false => self.find_page_pointer_index(parent, deleted),
+        };
+        let (value, _, row_ids) = self.read_full_index_value_index(parent, index);
+        let value = value.unwrap();
+        self.remove_cell(parent, index, false);
+        self.write_cell(merge, &value, row_ids, 0xFFFFFFFF);
+    }
+
+    fn find_page_pointer_index(&mut self, page: u32, child_page: u32) -> u16 {
+        let num_cells = self.get_num_cells(page);
+        for i in 0..num_cells {
+            let offset = self.get_cell_offset(page, i);
+            let (_, child, _) = self.read_full_index_value(page, offset);
+            if let Some(child) = child {
+                if child == child_page {
+                    return i;
+                }
+            }
+        }
+        panic!("Child page not found: {}", child_page);
     }
 
     pub fn insert_item_into_cell(&mut self, row_id: u32, new_value: &DataType) {
@@ -571,6 +781,15 @@ impl IndexFile {
         2 + value.size() + num_row_ids as u16 * 4
     }
 
+    fn cell_size(&self, value: &DataType, num_row_ids: usize, page_type: PageType) -> u16 {
+        self.payload_size(value, num_row_ids)
+            + 2
+            + match page_type {
+                PageType::IndexInterior => 4,
+                _ => 0,
+            }
+    }
+
     pub fn print(&mut self) {
         let num_pages = self.len() / PAGE_SIZE;
         if num_pages == 0 {
@@ -640,18 +859,19 @@ impl IndexFile {
         let total_offset = page as u64 * PAGE_SIZE + offset as u64;
         print!("{:08X}  ", total_offset);
         let (value, child_page, row_ids) = self.read_full_index_value(page, offset);
-        self.seek_to_page_offset(page, offset + 2);
+        self.seek_to_page_offset(page, offset);
         if let Some(child_page) = child_page {
             print!("{:08X} ", child_page);
             self.skip_bytes(4);
         }
         let payload_size = self.read_u16();
         print!("{:04X} ", payload_size.blue());
-        if !row_ids.is_empty() {
-            print!("{:?} ", row_ids.len().yellow());
-        }
+        print!("{:?} ", row_ids.len().yellow());
         if let Some(value) = value {
-            print!("{:?} ", Into::<u8>::into(&value).cyan());
+            let v_u8 = Into::<u8>::into(&value);
+            print!("{:02X}", v_u8.cyan());
+            let v_size = value.size();
+            print!("({}) ", v_size.cyan());
             print!("{:?} ", value.red());
         }
         for (i, id) in row_ids.iter().enumerate() {
@@ -712,24 +932,6 @@ mod test {
         );
         assert_eq!(0, search_result.len());
         teardown("test_index_update");
-    }
-
-    #[test]
-    fn test_index_remove_item_from_cell() {
-        let mut index_file = setup_index_file("test_index_remove_item_from_cell");
-        let value =
-            DataType::Text("Terminology St 176, Summerholm, Guadeloupe, 673843".to_string());
-        index_file.remove_item_from_cell(9, &value);
-        let search_result = index_file.search(&value, "=");
-        assert_eq!(0, search_result.len());
-        teardown("test_index_remove_item_from_cell");
-        let mut index_file = setup_index_file("test_index_remove_item_from_cell");
-        index_file.insert_item_into_cell(10, &value);
-        index_file.remove_item_from_cell(9, &value);
-        let search_result = index_file.search(&value, "=");
-        assert_eq!(1, search_result.len());
-        assert_eq!(10, search_result[0]);
-        teardown("test_index_remove_item_from_cell");
     }
 
     #[test]
@@ -797,5 +999,93 @@ mod test {
         let index_file = setup("test_index_long_file", 2, "data/longdata.txt");
         assert_ne!(10, index_file.len() / PAGE_SIZE);
         teardown("test_index_long_file");
+    }
+
+    #[test]
+    fn test_index_remove_item_from_cell() {
+        let mut index_file = setup_index_file("test_index_remove_item_from_cell");
+        let value =
+            DataType::Text("Terminology St 176, Summerholm, Guadeloupe, 673843".to_string());
+        index_file.remove_item_from_cell(9, &value);
+        let search_result = index_file.search(&value, "=");
+        assert_eq!(0, search_result.len());
+        teardown("test_index_remove_item_from_cell");
+        let mut index_file = setup_index_file("test_index_remove_item_from_cell");
+        index_file.insert_item_into_cell(10, &value);
+        index_file.remove_item_from_cell(9, &value);
+        let search_result = index_file.search(&value, "=");
+        assert_eq!(1, search_result.len());
+        assert_eq!(10, search_result[0]);
+        teardown("test_index_remove_item_from_cell");
+    }
+
+    #[test]
+    fn test_index_remove_cell() {
+        let mut index_file = setup_index_file("test_index_remove_cell");
+        let value =
+            DataType::Text("Terminology St 176, Summerholm, Guadeloupe, 673843".to_string());
+        let (page, index) = index_file.find_value(&value).unwrap();
+        let num_cells = index_file.get_num_cells(page);
+        let (_, _, row_ids) = index_file.read_full_index_value_index(page, index);
+        index_file.remove_item_from_cell(row_ids[0], &value);
+        let new_num_cells = index_file.get_num_cells(page);
+        assert_eq!(num_cells, new_num_cells + 1);
+        let search_result = index_file.search(&value, "=");
+        assert_eq!(0, search_result.len());
+        teardown("test_index_remove_cell");
+    }
+
+    #[test]
+    fn test_index_remove_last_cell_right() {
+        let mut index_file = setup_index_file("test_index_remove_last_cell_right");
+        let page = 2;
+        for i in 0..8 {
+            let offset = index_file.get_cell_offset(page, 0);
+            let (value, _, row_ids) = index_file.read_full_index_value(page, offset);
+            if let Some(value) = value {
+                for id in row_ids {
+                    index_file.remove_item_from_cell(id, &value);
+                }
+            }
+        }
+        assert_eq!(1, index_file.len() / PAGE_SIZE);
+        assert_eq!(2, index_file.get_num_cells(0));
+        teardown("test_index_remove_last_cell_right");
+    }
+
+    #[test]
+    fn test_index_remove_last_cell_left() {
+        let mut index_file = setup_index_file("test_index_remove_last_cell_left");
+        let page = 0;
+        for i in 0..8 {
+            let offset = index_file.get_cell_offset(page, 0);
+            let (value, _, row_ids) = index_file.read_full_index_value(page, offset);
+            if let Some(value) = value {
+                for id in row_ids {
+                    index_file.remove_item_from_cell(id, &value);
+                }
+            }
+        }
+        assert_eq!(1, index_file.len() / PAGE_SIZE);
+        assert_eq!(2, index_file.get_num_cells(0));
+        teardown("test_index_remove_last_cell_left");
+    }
+
+    #[test]
+    fn test_index_remove_last_cell_interior() {
+        let mut index_file = setup_index_file("test_index_remove_last_cell_interior");
+        let page = 1;
+        for i in 0..8 {
+            let offset = index_file.get_cell_offset(page, 1);
+            let (value, _, row_ids) = index_file.read_full_index_value(page, offset);
+            if let Some(value) = value {
+                for id in row_ids {
+                    index_file.remove_item_from_cell(id, &value);
+                }
+            }
+        }
+        assert_eq!(1, index_file.len() / PAGE_SIZE);
+        assert_eq!(2, index_file.get_num_cells(0));
+        teardown("test_index_remove_last_cell_interior");
     }
 }

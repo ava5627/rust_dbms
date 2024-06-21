@@ -24,8 +24,11 @@ fn main() {
             table_file.dump();
             table_file.print();
         } else if file_ext == "ndx" {
-            let column_name = file_name.split('.').nth(1).unwrap();
-            let mut index_file = index_file::IndexFile::new(file_name, column_name, file_dir);
+            let parts: Vec<&str> = file_name.split('.').collect();
+            let table_name = parts[0];
+            let column_name = parts[1];
+            let mut index_file = index_file::IndexFile::new(table_name, column_name, file_dir);
+            index_file.dump();
             index_file.print();
         } else {
             println!("Invalid file extension: {}", file_ext);

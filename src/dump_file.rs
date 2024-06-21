@@ -2,6 +2,7 @@ use std::io::Read;
 
 use crate::constants::{DataType, PageType, PAGE_SIZE};
 use crate::database_file::DatabaseFile;
+use crate::index_file::IndexFile;
 use crate::read_write_types::ReadWriteTypes;
 use crate::table_file::TableFile;
 use crate::utils::rainbow;
@@ -214,6 +215,200 @@ impl DumpFile for TableFile {
                     } else {
                         current_row = Some((vec![byte], 0, 0, vec![]));
                         format!("{:02X} ", byte.blue())
+                    }
+                } else {
+                    format!("{:02X} ", byte)
+                };
+                print!("{}", byte_str);
+            }
+            println!(" | {}", pretty_row.join(" "));
+        }
+    }
+}
+
+impl DumpFile for IndexFile {
+    fn dump(&mut self) {
+        let num_pages = self.len() / PAGE_SIZE;
+        for i in 0..num_pages as u32 {
+            self.dump_page(i);
+            println!();
+        }
+    }
+
+    fn dump_page(&mut self, page_num: u32) {
+        let page_offset = page_num * PAGE_SIZE as u32;
+        let bytes_per_row = 16;
+        let num_rows = PAGE_SIZE as u32 / bytes_per_row;
+        self.seek_to_page(page_num);
+        print!("{:08X}  | ", page_offset);
+        let page_type = self.read_u8();
+        print!("{}", self.dump_bytes(&[page_type]).green());
+        let unused = self.read_u8();
+        print!("{}", self.dump_bytes(&[unused]));
+        let num_cells = self.read_u16();
+        print!("{}", self.dump_bytes(&num_cells.to_le_bytes()).blue());
+        let content_start = self.read_u16();
+        print!("{}", self.dump_bytes(&content_start.to_le_bytes()).purple());
+        let next_page = self.read_u32();
+        print!("{}", self.dump_bytes(&next_page.to_le_bytes()).yellow());
+        let parent_page = self.read_u32();
+        print!("{}", self.dump_bytes(&parent_page.to_le_bytes()).cyan());
+        let unused = self.read_u16();
+        print!("{}", self.dump_bytes(&unused.to_le_bytes()));
+        print!(" | ");
+        print!("{:?} ", PageType::from(page_type).green());
+        print!("{} ", num_cells.blue());
+        print!(
+            "{:04X} {:04X} ",
+            content_start.purple(),
+            (content_start + page_offset as u16).purple()
+        );
+        print!("{:08X} ", next_page.yellow());
+        print!("{:08X} ", parent_page.cyan());
+        println!();
+
+        let mut skip = false;
+        let mut current_cell = 0;
+        let mut offsets = vec![0; (num_cells * 2) as usize];
+        let mut current_row: Option<(Vec<u8>, usize, u8, u8)> = None;
+        for i in 1..num_rows {
+            let mut row_bytes = vec![0; bytes_per_row as usize];
+            let mut pretty_row: Vec<String> = vec![];
+            self.read_exact(&mut row_bytes)
+                .expect("Failed to read row bytes");
+            if row_bytes.iter().all(|&b| b == 0)
+                && (i + 1) * bytes_per_row < content_start as u32
+            {
+                if !skip {
+                    print!("{:08X}  | ", page_offset + i * bytes_per_row);
+                    println!(" *");
+                    skip = true;
+                }
+                continue;
+            } else {
+                skip = false;
+            }
+            print!("{:08X}  | ", page_offset + i * bytes_per_row);
+            for (b, &byte) in row_bytes.iter().enumerate() {
+                let byte_str = if current_cell / 2 < num_cells {
+                    offsets[current_cell as usize] = byte;
+                    current_cell += 1;
+                    if current_cell % 2 == 0 {
+                        let offset = u16::from_le_bytes([offsets[current_cell as usize - 2], byte]);
+                        pretty_row.push(rainbow(
+                            format!("{:04X}", offset).as_str(),
+                            (current_cell - 1) as usize / 2,
+                        ));
+                    }
+                    rainbow(
+                        format!("{:02X} ", byte).as_str(),
+                        (current_cell - 1) as usize / 2,
+                    )
+                } else if i * bytes_per_row + b as u32 >= content_start as u32 {
+                    let offsets: Vec<u16> = offsets
+                        .chunks(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    let current_offset = i * bytes_per_row + b as u32;
+                    if offsets.contains(&(current_offset as u16)) && current_row.is_some() {
+                        pretty_row.push("Record starts before previous ends".on_red().to_string());
+                        current_row = Some((vec![], 0, 0, 0));
+                    }
+                    if let Some((ref row_bytes, val_index, val_type, num_row_ids)) = current_row {
+                        let mut val_index = val_index;
+                        let mut val_type = val_type;
+                        let mut num_row_ids = num_row_ids;
+                        let val_size = DataType::size_type(val_type);
+                        let mut current_row_index = row_bytes.len() as u8;
+                        if PageType::from(page_type) == PageType::IndexLeaf {
+                            current_row_index += 4;
+                        }
+                        let mut row_bytes = row_bytes.clone();
+                        row_bytes.push(byte);
+                        let out = match current_row_index {
+                            0..=2 => format!("{:02X} ", byte.on_blue()),
+                            3 => {
+                                let child_page =
+                                    u32::from_le_bytes(row_bytes[0..4].try_into().unwrap());
+                                pretty_row.push(format!("Child Page: {}", child_page));
+                                format!("{:02X} ", byte.on_blue())
+                            }
+                            4 => format!("{:02X} ", byte.blue()),
+                            5 => {
+                                let o = match PageType::from(page_type) {
+                                    PageType::IndexLeaf => (0, 2),
+                                    PageType::IndexInterior => (4, 6),
+                                    _ => unreachable!(),
+                                };
+                                let payload_size =
+                                    u16::from_le_bytes(row_bytes[o.0..o.1].try_into().unwrap());
+                                pretty_row
+                                    .push(format!("Payload Size: {:02X}", payload_size.blue()));
+                                format!("{:02X} ", byte.blue())
+                            }
+                            6 => {
+                                num_row_ids = byte;
+                                pretty_row.push(format!("Num Row ids: {}", num_row_ids.yellow()));
+                                format!("{:02X} ", byte.yellow())
+                            }
+                            7 => {
+                                val_type = byte;
+                                let val_data_type = DataType::from(val_type);
+                                pretty_row.push(format!("{:?}", val_data_type.cyan()));
+                                format!("{:02X} ", byte.cyan())
+                            }
+                            8.. => {
+                                if current_row_index < 7 + val_size {
+                                    format!("{:02X} ", byte.red())
+                                } else if current_row_index == 7 + val_size {
+                                    let o = match PageType::from(page_type) {
+                                        PageType::IndexLeaf => 4,
+                                        PageType::IndexInterior => 8,
+                                        _ => unreachable!(),
+                                    };
+                                    let value = match DataType::try_from((
+                                        val_type,
+                                        row_bytes[o..].to_vec(),
+                                    )) {
+                                        Ok(value) => format!("{:?}", value.red()),
+                                        Err(_) => "Error parsing value".to_string(),
+                                    };
+                                    pretty_row.push(value);
+                                    pretty_row.push("[".to_string());
+                                    format!("{:02X} ", byte.red())
+                                } else if current_row_index <= 7 + val_size + num_row_ids * 4 {
+                                    if val_index == 0 {
+                                        val_index = row_bytes.len();
+                                    }
+                                    if val_index == row_bytes.len() - 3 {
+                                        let row_id = u32::from_le_bytes(
+                                            row_bytes[val_index - 1..].try_into().unwrap(),
+                                        );
+                                        pretty_row.push(format!("{},", row_id.purple()));
+                                        val_index = 0;
+                                    }
+                                    format!("{:02X} ", byte.purple())
+                                } else {
+                                    format!("{:02X} ", byte.on_red())
+                                }
+                            }
+                        };
+                        if current_row_index == 7 + val_size + num_row_ids * 4 && val_size > 0 {
+                            pretty_row.push("]".to_string());
+                            current_row = None;
+                        } else {
+                            current_row = Some((row_bytes, val_index, val_type, num_row_ids));
+                        }
+                        out
+                    } else if offsets.contains(&(current_offset as u16)) {
+                        current_row = Some((vec![byte], 0, 0, 0));
+                        if PageType::from(page_type) == PageType::IndexLeaf {
+                            format!("{:02X} ", byte.blue())
+                        } else {
+                            format!("{:02X} ", byte.on_blue())
+                        }
+                    } else {
+                        format!("{:02X} ", byte.on_red().black())
                     }
                 } else {
                     format!("{:02X} ", byte)
