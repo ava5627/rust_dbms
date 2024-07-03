@@ -170,14 +170,14 @@ impl IndexFile {
         if parent_page == 0xFFFFFFFF {
             parent_page = self.create_interior_page(parent_page, page);
             // Set the parent page
-            self.seek_to_page_offset(page, 0x0A);
-            self.write_u32(parent_page);
+            self.update_parent_page(page, parent_page);
         }
 
         let middle = self.get_num_cells(page) / 2;
         let middle_offset = self.get_cell_offset(page, middle);
         let (value, child_pointer, row_ids) = self.read_full_index_value(page, middle_offset);
 
+        // Create a new sibling page
         let new_page = match child_pointer {
             Some(p) => self.create_interior_page(parent_page, p),
             None => self.create_page(parent_page, PageType::IndexLeaf),
@@ -197,21 +197,40 @@ impl IndexFile {
             .expect("Error writing zero bytes");
 
         self.move_cells(page, new_page, middle);
+        if page_type == PageType::IndexInterior {
+            self.update_parent_pages(new_page);
+        }
 
         self.seek_to_page_offset(page, 0x10 + middle * 2);
         self.write_u16(0);
 
         let remaining_cells_offset = self.get_cell_offset(page, middle - 1);
         self.seek_to_page_offset(page, 0x02);
-
         self.write_u16(middle);
         self.write_u16(remaining_cells_offset);
+
 
         if split_value > &value {
             new_page
         } else {
             page
         }
+    }
+
+    fn update_parent_pages(&mut self, new_parent: u32) {
+        let num_cells = self.get_num_cells(new_parent);
+        for i in 0..num_cells {
+            let offset = self.get_cell_offset(new_parent, i);
+            let (_, child, _) = self.read_full_index_value(new_parent, offset);
+            if let Some(child) = child {
+                self.update_parent_page(child, new_parent);
+            }
+        }
+    }
+
+    fn update_parent_page(&mut self, page: u32, parent: u32) {
+        self.seek_to_page_offset(page, 0x0A);
+        self.write_u32(parent);
     }
 
     fn find_value_position(&mut self, page: u32, value: &DataType) -> Option<u16> {
@@ -278,7 +297,8 @@ impl IndexFile {
 
         // Write the modified offsets to the destination page
         let offset_diff = content_start as i32 - new_content_start as i32;
-        self.seek_to_page_offset(destination_page, 0x10);
+        let dest_num_cells = self.get_num_cells(destination_page);
+        self.seek_to_page_offset(destination_page, 0x10 + dest_num_cells * 2);
         let modified_offsets = cell_offsets
             .chunks(2)
             .map(|offset| (u16::from_le_bytes([offset[0], offset[1]]) as i32 - offset_diff as i32))
@@ -289,7 +309,7 @@ impl IndexFile {
 
         // Update the number of cells on the destination page
         self.seek_to_page_offset(destination_page, 0x02);
-        self.write_u16(num_cells_to_move);
+        self.write_u16(num_cells_to_move + dest_num_cells);
         // Update the number of cells on the source page
         self.seek_to_page_offset(source_page, 0x02);
         self.write_u16(preceding_cell);
@@ -330,7 +350,11 @@ impl IndexFile {
         let cell_size = self.cell_size(value, row_ids.len(), page_type);
 
         let page = if self.should_split(page, cell_size as i32) {
-            self.split_page(page, value)
+            let page = self.split_page(page, value);
+            if child_page != 0xFFFFFFFF {
+                self.update_parent_page(child_page, page);
+            }
+            page
         } else {
             page
         };
@@ -379,7 +403,7 @@ impl IndexFile {
     pub fn remove_item_from_cell(&mut self, row_id: u32, value: &DataType) {
         let (page, index) = self
             .find_value(value)
-            .expect("Cannot remove item that does not exist");
+            .unwrap_or_else(|(p, _)| panic!("Value not found: {}", value));
         let offset = self.get_cell_offset(page, index);
         let (_, _, mut row_ids) = self.read_full_index_value(page, offset);
         let id_index = match row_ids.iter().position(|id| id == &row_id) {
@@ -457,7 +481,12 @@ impl IndexFile {
         let index = self.find_page_pointer_index(parent_page, page);
         if let Some(right) = self.right_sibling(page) {
             match self.get_num_cells(right) {
-                0 => panic!("Right sibling ({}) of {} has no cells: {}", right, page, self.get_num_cells(right)),
+                0 => panic!(
+                    "Right sibling ({}) of {} has no cells: {}",
+                    right,
+                    page,
+                    self.get_num_cells(right)
+                ),
                 2.. => self.steal_from_sibling(page, right, true),
                 1 => {
                     self.merge_pages(parent_page, right, page, true);
@@ -470,7 +499,12 @@ impl IndexFile {
             }
         } else if let Some(left) = self.left_sibling(page) {
             match self.get_num_cells(left) {
-                0 => panic!("Left sibling ({}) of {} has no cells: {}", left, page, self.get_num_cells(left)),
+                0 => panic!(
+                    "Left sibling ({}) of {} has no cells: {}",
+                    left,
+                    page,
+                    self.get_num_cells(left)
+                ),
                 2.. => self.steal_from_sibling(page, left, false),
                 1 => {
                     self.merge_pages(parent_page, left, page, false);
@@ -567,7 +601,10 @@ impl IndexFile {
         let num_cells = self.get_num_cells(sibling);
         let sibling_index = if right { 0 } else { num_cells - 1 };
         if num_cells < 2 {
-            panic!("Sibling {} has too few cells {} to steal from", sibling, num_cells);
+            panic!(
+                "Sibling {} has too few cells {} to steal from",
+                sibling, num_cells
+            );
         }
         let (sibling_value, _, sibling_row_ids) =
             self.read_full_index_value_index(sibling, sibling_index);
@@ -812,7 +849,7 @@ impl IndexFile {
         let unused_2 = self.read_u16();
 
         let page_start = page as u64 * PAGE_SIZE;
-        println!("Page: {}", page);
+        println!("Page: {:02X}", page);
         println!(
             "{:8}  {}, XX, {}, {}, {}, {}",
             "",
@@ -861,7 +898,7 @@ impl IndexFile {
         let (value, child_page, row_ids) = self.read_full_index_value(page, offset);
         self.seek_to_page_offset(page, offset);
         if let Some(child_page) = child_page {
-            print!("{:08X} ", child_page);
+            print!("{:08X} ", child_page.green());
             self.skip_bytes(4);
         }
         let payload_size = self.read_u16();
@@ -874,9 +911,14 @@ impl IndexFile {
             print!("({}) ", v_size.cyan());
             print!("{:?} ", value.red());
         }
+        print!("[ ");
         for (i, id) in row_ids.iter().enumerate() {
-            print!("{} ", rainbow(&format!("{:08X}", id), i));
+            print!("{}", rainbow(&format!("{:08X}", id), i));
+            if i < row_ids.len() - 1 {
+                print!(", ");
+            }
         }
+        print!(" ]");
     }
 }
 
@@ -998,7 +1040,7 @@ mod test {
     fn test_index_long_file() {
         let index_file = setup("test_index_long_file", 2, "data/longdata.txt");
         assert_ne!(10, index_file.len() / PAGE_SIZE);
-        teardown("test_index_long_file");
+        // teardown("test_index_long_file");
     }
 
     #[test]

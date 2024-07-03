@@ -256,6 +256,7 @@ impl DumpFile for IndexFile {
         let unused = self.read_u16();
         print!("{}", self.dump_bytes(&unused.to_le_bytes()));
         print!(" | ");
+        print!("{:02X} ", page_num);
         print!("{:?} ", PageType::from(page_type).green());
         print!("{} ", num_cells.blue());
         print!(
@@ -326,12 +327,12 @@ impl DumpFile for IndexFile {
                         let mut row_bytes = row_bytes.clone();
                         row_bytes.push(byte);
                         let out = match current_row_index {
-                            0..=2 => format!("{:02X} ", byte.on_blue()),
+                            0..=2 => format!("{:02X} ", byte.green()),
                             3 => {
                                 let child_page =
                                     u32::from_le_bytes(row_bytes[0..4].try_into().unwrap());
-                                pretty_row.push(format!("Child Page: {}", child_page));
-                                format!("{:02X} ", byte.on_blue())
+                                pretty_row.push(format!("{:08X}", child_page.green()));
+                                format!("{:02X} ", byte.green())
                             }
                             4 => format!("{:02X} ", byte.blue()),
                             5 => {
@@ -343,12 +344,12 @@ impl DumpFile for IndexFile {
                                 let payload_size =
                                     u16::from_le_bytes(row_bytes[o.0..o.1].try_into().unwrap());
                                 pretty_row
-                                    .push(format!("Payload Size: {:02X}", payload_size.blue()));
+                                    .push(format!("{:02X}", payload_size.blue()));
                                 format!("{:02X} ", byte.blue())
                             }
                             6 => {
                                 num_row_ids = byte;
-                                pretty_row.push(format!("Num Row ids: {}", num_row_ids.yellow()));
+                                pretty_row.push(format!("{}", num_row_ids.yellow()));
                                 format!("{:02X} ", byte.yellow())
                             }
                             7 => {
@@ -405,7 +406,7 @@ impl DumpFile for IndexFile {
                         if PageType::from(page_type) == PageType::IndexLeaf {
                             format!("{:02X} ", byte.blue())
                         } else {
-                            format!("{:02X} ", byte.on_blue())
+                            format!("{:02X} ", byte.green())
                         }
                     } else {
                         format!("{:02X} ", byte.on_red().black())
