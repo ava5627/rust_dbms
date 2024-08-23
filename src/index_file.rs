@@ -1040,7 +1040,7 @@ mod test {
     fn test_index_long_file() {
         let index_file = setup("test_index_long_file", 2, "data/longdata.txt");
         assert_ne!(10, index_file.len() / PAGE_SIZE);
-        // teardown("test_index_long_file");
+        teardown("test_index_long_file");
     }
 
     #[test]
