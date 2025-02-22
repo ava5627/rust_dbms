@@ -31,7 +31,6 @@ use crate::{
 ///     * Payload type: 1-byte, data type of the payload
 ///     * value: Variable length, the value of the cell
 ///     * Row IDs: 4-bytes each, row IDs with the value
-
 pub struct IndexFile {
     file: File,
 }
@@ -208,7 +207,6 @@ impl IndexFile {
         self.seek_to_page_offset(page, 0x02);
         self.write_u16(middle);
         self.write_u16(remaining_cells_offset);
-
 
         if split_value > &value {
             new_page

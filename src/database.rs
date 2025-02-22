@@ -82,7 +82,7 @@ impl Database {
             .search(Some("table_name"), table_name_dt.clone(), "=")
             .unwrap();
         if tables.len() > 1 {
-            panic!("Multiple tables with the same name found");
+            panic!("Multiple tables with the same name found: {}", table_name);
         }
         if tables.is_empty() {
             return None;
@@ -652,7 +652,7 @@ fn cols_vec(
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDate, NaiveTime};
-    use serial_test::serial;
+    use serial_test::file_serial;
 
     use super::*;
 
@@ -679,7 +679,7 @@ mod tests {
         db
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_initialize() {
         let mut db = setup_db();
@@ -698,7 +698,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_create_table() {
         let mut db = setup_db();
@@ -711,7 +711,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_drop_table() {
         let mut db = setup_db();
@@ -728,7 +728,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_insert_command() {
         let mut db = setup_db_with_table();
@@ -749,7 +749,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_nullable() {
         let mut db = setup_db();
@@ -768,7 +768,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_unique() {
         let mut db = setup_db();
@@ -781,7 +781,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_delete_command() {
         let mut db = setup_db_with_table();
@@ -803,7 +803,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_update_command() {
         let mut db = setup_db_with_table();
@@ -830,7 +830,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_select_command() {
         let mut db = setup_db_with_table();
@@ -848,7 +848,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_select_from_system() {
         let mut db = setup_db();
@@ -861,7 +861,7 @@ mod tests {
         teardown_db();
     }
 
-    #[serial]
+    #[file_serial]
     #[test]
     fn test_date_types() {
         let mut db = setup_db();

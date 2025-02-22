@@ -11,7 +11,7 @@ use crate::{
 pub fn rainbow(content: &str, num: usize) -> String {
     let colors = ["magenta", "cyan", "green", "blue", "yellow", "red"];
     let color: AnsiColors = colors[num % colors.len()].into();
-    return content.color(color).to_string();
+    content.color(color).to_string()
 }
 
 pub fn setup_columns() -> Vec<Column> {
