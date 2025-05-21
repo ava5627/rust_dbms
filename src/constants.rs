@@ -82,7 +82,7 @@ impl DataType {
             | DataType::DateTime(_)
             | DataType::Date(_)
             | DataType::Double(_) => 8,
-            DataType::Text(s) => s.as_bytes().len() as u16,
+            DataType::Text(s) => s.len() as u16,
             DataType::Unused => unreachable!("Unused data type has no size"),
         }
     }

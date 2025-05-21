@@ -253,7 +253,7 @@ impl IndexFile {
             } else {
                 high = mid - 1;
             }
-            mid = (low + high + 1) / 2;
+            mid = (low + high).div_ceil(2);
         }
         Some(mid)
     }

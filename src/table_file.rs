@@ -171,12 +171,11 @@ impl TableFile {
         let mut offset = self.get_cell_offset(page, index);
         let mut record = self.read_record(page, offset);
         if let DataType::Text(v) = &record.values[column_index as usize] {
-            let old_size = v.as_bytes().len() as u16;
-            let value_text = match value {
-                DataType::Text(ref v) => v,
+            let old_size = v.len() as u16;
+            let new_size = match value {
+                DataType::Text(ref v_new) => v_new.len(),
                 _ => unreachable!("Value is not text while column is text"),
-            };
-            let new_size = value_text.as_bytes().len() as u16;
+            } as u16;
             if self.should_split(page, new_size as i32 - old_size as i32) {
                 self.split_page(page, row_id);
                 (page, index) = self.find_record(row_id).expect("Record not found");
@@ -273,7 +272,7 @@ impl TableFile {
                 std::cmp::Ordering::Greater => high = current_cell - 1,
                 std::cmp::Ordering::Equal => break,
             }
-            current_cell = (low + high + 1) / 2;
+            current_cell = (low + high).div_ceil(2);
             current_row_id = self.get_row_id(page, current_cell);
         }
         current_cell
