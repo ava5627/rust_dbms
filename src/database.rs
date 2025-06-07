@@ -1,4 +1,5 @@
 use std::fmt::Write as FmtWrite;
+use std::path::Path;
 use std::{collections::VecDeque, io::Write};
 
 use crate::{
@@ -220,9 +221,26 @@ impl Database {
             if input.ends_with(";\n") {
                 break;
             }
-            print!("{}", prompt);
         }
         input
+    }
+
+    pub fn read_file_input(&mut self, file_path: &Path) -> Result<Vec<String>, String> {
+        let content = std::fs::read_to_string(file_path)
+            .map_err(|e| format!("Failed reading file: {}", e))?;
+        let output = content
+            .split(';')
+            .map(|s| {
+                s.trim()
+                    .lines()
+                    .map(|line| line.trim())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|s| !s.is_empty())
+            .map(|s| self.parse_user_input(&s))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(output)
     }
 
     pub fn run(&mut self) {
@@ -424,9 +442,7 @@ impl Database {
             .map(|c| {
                 col_val
                     .find(|(col, _)| col.name == c.name)
-                    .unwrap_or((c, DataType::Null))
-                    .1
-                    .clone()
+                    .map_or(DataType::Null, |(_, val)| val)
             })
             .collect();
         table.insert(full_valls)?;
@@ -449,7 +465,8 @@ impl Database {
             return Err("Expected =.".to_string());
         }
         let value_str = tokens.pop_front().ok_or("No value specified.")?;
-        let value = DataType::parse_str(column.data_type.clone(), &value_str)?;
+        let value = DataType::parse_str(column.data_type.clone(), &value_str)
+            .map_err(|e| format!("Failed parsing {} into {}: {}", value_str, column_name, e))?;
         let (search_column, search_operator, search_value) =
             self.parse_condition(tokens, &table)?;
         let updated = table.update(
@@ -493,7 +510,7 @@ impl Database {
             return Ok(table.columns.iter().collect());
         }
 
-        let collect: Result<Vec<&Column>, String> = tokens
+        let collect = tokens
             .iter()
             .take_while(|&t| t.to_lowercase() != "from" && t != ")")
             .filter(|&t| t != ",")
@@ -532,14 +549,22 @@ impl Database {
             if t == "," || t == ")" {
                 if columns.len() < values.len() + 1 {
                     return Err(format!(
-                        "Too many values specified. Expected {}.",
-                        columns.len()
+                        "Too many values specified. Expected {} but got {}.",
+                        columns.len(),
+                        values.len() + 1
                     ));
                 }
-                values.push(DataType::parse_str(
-                    columns[values.len()].data_type.clone(),
-                    &current,
-                )?);
+                values.push(
+                    DataType::parse_str(columns[values.len()].data_type.clone(), &current)
+                        .map_err(|e| {
+                            format!(
+                                "Failed parsing {} into {}: {}",
+                                current,
+                                columns[values.len()].name,
+                                e
+                            )
+                        })?,
+                );
                 current.clear();
                 continue;
             }
@@ -567,7 +592,8 @@ impl Database {
             .ok_or(format!("Column {} not found.", column_name))?;
         let operator = tokens.pop_front().ok_or("No operator specified.")?;
         let value_str = tokens.pop_front().ok_or("No value specified.")?;
-        let value = DataType::parse_str(column.data_type.clone(), &value_str)?;
+        let value = DataType::parse_str(column.data_type.clone(), &value_str)
+            .map_err(|e| format!("Failed parsing {} into {}: {}", value_str, column_name, e))?;
         Ok((Some(column_name), operator, value))
     }
 
@@ -650,9 +676,9 @@ fn cols_vec(
 }
 
 #[cfg(test)]
+#[serial_test::serial]
 mod tests {
     use chrono::{NaiveDate, NaiveTime};
-    use serial_test::file_serial;
 
     use super::*;
 
@@ -674,12 +700,11 @@ mod tests {
 
     fn setup_db_with_table() -> Database {
         let mut db = setup_db();
-        db.parse_user_input("CREATE TABLE test (id INT, name TEXT);")
+        db.parse_user_input("CREATE TABLE test (id INT PRIMARY_KEY, name TEXT);")
             .expect("Failed creating table");
         db
     }
 
-    #[file_serial]
     #[test]
     fn test_initialize() {
         let mut db = setup_db();
@@ -698,7 +723,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_create_table() {
         let mut db = setup_db();
@@ -711,7 +735,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_drop_table() {
         let mut db = setup_db();
@@ -728,7 +751,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_insert_command() {
         let mut db = setup_db_with_table();
@@ -749,7 +771,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_nullable() {
         let mut db = setup_db();
@@ -768,7 +789,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_unique() {
         let mut db = setup_db();
@@ -781,7 +801,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_delete_command() {
         let mut db = setup_db_with_table();
@@ -803,7 +822,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_update_command() {
         let mut db = setup_db_with_table();
@@ -830,7 +848,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_select_command() {
         let mut db = setup_db_with_table();
@@ -848,7 +865,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_select_from_system() {
         let mut db = setup_db();
@@ -861,7 +877,6 @@ mod tests {
         teardown_db();
     }
 
-    #[file_serial]
     #[test]
     fn test_date_types() {
         let mut db = setup_db();
@@ -906,5 +921,43 @@ mod tests {
         let res_str = "Table: test\nid date time datetime year \n1 2021-01-01 12:00:00 2021-01-01 12:00:00 2021 \n";
         assert_eq!(res, res_str);
         teardown_db();
+    }
+
+    #[test]
+    fn test_read_file_input() {
+        let mut db = setup_db();
+        let file_path = std::path::Path::new("data/test.sql");
+        let content = r#"
+            CREATE TABLE test (
+                id INT PRIMARY_KEY,
+                name TEXT
+            );
+            INSERT INTO test (id, name) VALUES (1, 'Alice');
+            INSERT INTO test (id, name) VALUES (2, 'Bob');
+            INSERT INTO test (id, name) VALUES (3, 'Charlie');
+            SELECT * FROM test;
+        "#;
+        std::fs::write(file_path, content).expect("Failed writing test file");
+        let out = db
+            .read_file_input(file_path)
+            .expect("Failed reading file input");
+        let mut table = db.load_table("test").expect("Table not found");
+        assert_eq!(table.name, "test");
+        let columns = &table.columns;
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[1].name, "name");
+        assert_eq!(columns[0].data_type, DataType::Int(0));
+        assert_eq!(columns[1].data_type, DataType::Text("".to_string()));
+        let records = table
+            .search(None, DataType::Null, "=")
+            .expect("Failed searching");
+        assert_eq!(records.len(), 3);
+        let select_res = db
+            .parse_user_input("SELECT * FROM test;")
+            .expect("Failed selecting");
+        assert_eq!(select_res, out[4]);
+        teardown_db();
+        std::fs::remove_file(file_path).expect("Failed removing test file");
     }
 }

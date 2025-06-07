@@ -98,7 +98,7 @@ impl Table {
                     column.name, column.data_type, values[i]
                 ));
             }
-            if column.unique || self.get_index_file(&column.name).is_some() {
+            if column.unique {
                 let records = self.search(Some(&column.name), values[i].clone(), "=")?;
                 if !records.is_empty() {
                     return Err(format!(
@@ -106,6 +106,9 @@ impl Table {
                         values[i], column.name
                     ));
                 }
+            }
+            if let Some(index_file) = &mut self.get_index_file(&column.name) {
+                index_file.insert_item_into_cell(next_row_id, &values[i]);
             }
         }
         let record = Record::new(values, next_row_id);
@@ -255,7 +258,9 @@ mod tests {
     fn test_insert() {
         let mut table = setup_table_no_records("test_insert");
         let records = setup_records("data/testdata.txt");
-        table.insert(records[0].values.clone()).expect("Error inserting record");
+        table
+            .insert(records[0].values.clone())
+            .expect("Error inserting record");
         assert_eq!(table.len(), 1);
         teardown("test_insert");
     }
@@ -264,7 +269,9 @@ mod tests {
     fn test_search() {
         let mut table = setup_table("test_search", "data/testdata.txt");
         let real_records = setup_records("data/testdata.txt");
-        let records = table.search(Some("name"), real_records[0].values[0].clone(), "=").unwrap();
+        let records = table
+            .search(Some("name"), real_records[0].values[0].clone(), "=")
+            .unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].values, real_records[0].values);
         teardown("test_search");

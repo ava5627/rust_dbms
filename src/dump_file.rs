@@ -277,9 +277,7 @@ impl DumpFile for IndexFile {
             let mut pretty_row: Vec<String> = vec![];
             self.read_exact(&mut row_bytes)
                 .expect("Failed to read row bytes");
-            if row_bytes.iter().all(|&b| b == 0)
-                && (i + 1) * bytes_per_row < content_start as u32
-            {
+            if row_bytes.iter().all(|&b| b == 0) && (i + 1) * bytes_per_row < content_start as u32 {
                 if !skip {
                     print!("{:08X}  | ", page_offset + i * bytes_per_row);
                     println!(" *");
@@ -343,8 +341,7 @@ impl DumpFile for IndexFile {
                                 };
                                 let payload_size =
                                     u16::from_le_bytes(row_bytes[o.0..o.1].try_into().unwrap());
-                                pretty_row
-                                    .push(format!("{:02X}", payload_size.blue()));
+                                pretty_row.push(format!("{:02X}", payload_size.blue()));
                                 format!("{:02X} ", byte.blue())
                             }
                             6 => {

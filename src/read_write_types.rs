@@ -1,8 +1,7 @@
-use std::io::{Read, Write};
 use crate::constants::DataType;
+use std::io::{Read, Write};
 
 pub trait ReadWriteTypes: Read + Write {
-
     fn write_i8(&mut self, value: i8) -> usize {
         self.write(&value.to_le_bytes()).expect("Failed writing")
     }
@@ -112,7 +111,7 @@ pub trait ReadWriteTypes: Read + Write {
         let size = DataType::size_type(data_type);
         let mut buf = vec![0; size as usize];
         self.read_exact(&mut buf).expect("Failed Reading");
-        
+
         match (data_type, buf).try_into() {
             Ok(value) => value,
             Err(e) => panic!("Failed to convert value: {}", e),

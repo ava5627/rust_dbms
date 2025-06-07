@@ -12,10 +12,13 @@ pub mod utils;
 use database::Database;
 use dump_file::DumpFile;
 
-fn main() {
+fn main() -> Result<(), String> {
     if std::env::args().len() == 2 || std::env::args().len() == 3 {
         let file_path = std::env::args().nth(1).unwrap();
         let file_path = std::path::Path::new(&file_path);
+        if !file_path.exists() {
+            return Err(format!("File not found: {}", file_path.display()));
+        }
         let file_dir = file_path.parent().unwrap().to_str().unwrap();
         let file_name = file_path.file_stem().unwrap().to_str().unwrap();
         let file_ext = file_path.extension().unwrap().to_str().unwrap();
@@ -45,11 +48,15 @@ fn main() {
                 index_file.dump();
                 index_file.print();
             }
+        } else if file_ext == "sql" {
+            let mut database = Database::new();
+            database.read_file_input(file_path)?;
         } else {
             println!("Invalid file extension: {}", file_ext);
         }
-        return;
+        return Ok(());
     }
     let mut database = Database::new();
     database.run();
+    Ok(())
 }

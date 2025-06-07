@@ -1,9 +1,10 @@
 use std::fmt::Display;
+use std::num::{ParseFloatError, ParseIntError};
 use std::str::FromStr;
 use DataType::*;
 extern crate chrono;
 
-use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime};
+use chrono::{DateTime as ChronoDateTime, NaiveDate, NaiveDateTime, ParseError};
 use chrono::{NaiveTime, Utc};
 
 pub const PAGE_SIZE: u64 = 512;
@@ -54,6 +55,21 @@ impl From<PageType> for u8 {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ParseDataTypeError {
+    #[error("Tried to parse invalid data type")]
+    InvalidDataType,
+
+    #[error("{0}")]
+    ParseError(#[from] ParseError),
+
+    #[error("{0}")]
+    ParseIntError(#[from] ParseIntError),
+
+    #[error("{0}")]
+    ParseFloatError(#[from] ParseFloatError),
+}
+
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub enum DataType {
     Null,
@@ -99,65 +115,36 @@ impl DataType {
         }
     }
 
-    pub fn parse_str(data_type: DataType, value: &str) -> Result<DataType, String> {
+    pub fn parse_str(data_type: DataType, value: &str) -> Result<DataType, ParseDataTypeError> {
         let value = value.trim();
         let pared = match data_type {
-            DataType::TinyInt(_) => DataType::TinyInt(
-                value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
-            ),
-            DataType::SmallInt(_) => DataType::SmallInt(
-                value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
-            ),
-            DataType::Int(_) => DataType::Int(
-                value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
-            ),
-            DataType::BigInt(_) => DataType::BigInt(
-                value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
-            ),
-            DataType::Float(_) => DataType::Float(
-                value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
-            ),
-            DataType::Double(_) => DataType::Double(
-                value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {}", value, data_type))?,
-            ),
+            DataType::TinyInt(_) => DataType::TinyInt(value.parse()?),
+            DataType::SmallInt(_) => DataType::SmallInt(value.parse()?),
+            DataType::Int(_) => DataType::Int(value.parse()?),
+            DataType::BigInt(_) => DataType::BigInt(value.parse()?),
+            DataType::Float(_) => DataType::Float(value.parse()?),
+            DataType::Double(_) => DataType::Double(value.parse()?),
             DataType::Year(_) => {
-                let year: i32 = value
-                    .parse()
-                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
+                let year: i32 = value.parse()?;
                 DataType::Year((year - 2000) as i8)
             }
             DataType::Time(_) => {
-                let time = NaiveTime::parse_from_str(value, "%H:%M:%S")
-                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
+                let time = NaiveTime::parse_from_str(value, "%H:%M:%S")?;
                 let seconds = time
                     .signed_duration_since(NaiveTime::from_hms_opt(0, 0, 0).unwrap())
                     .num_seconds();
                 DataType::Time(seconds as i32)
             }
             DataType::DateTime(_) => {
-                let second = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
+                let second = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")?;
                 DataType::DateTime(second.and_utc().timestamp())
             }
             DataType::Date(_) => {
-                let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                    .map_err(|_| format!("{} cannot be parsed into {:?}", value, data_type))?;
+                let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")?;
                 DataType::Date(date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
             }
             DataType::Text(_) => DataType::Text(value.to_string()),
-            _ => unreachable!("Invalid data type"),
+            _ => return Err(ParseDataTypeError::InvalidDataType),
         };
         Ok(pared)
     }
@@ -332,5 +319,17 @@ mod test {
         assert_eq!("01:00:00", format!("{}", time));
         assert_eq!("2021-03-01", format!("{}", date));
         assert_eq!("2021-03-01 01:00:00", format!("{}", datetime));
+        let bad_date_str = "2021, 03, 01";
+        let bad_time_str = "25:00:00";
+        let bad_integer_str = "not_a_number";
+        let bad_float_str = "not_a_float";
+        let date_error = DataType::parse_str(Date(0), bad_date_str);
+        let time_error = DataType::parse_str(Time(0), bad_time_str);
+        let int_error = DataType::parse_str(Int(0), bad_integer_str);
+        let float_error = DataType::parse_str(Float(0.0), bad_float_str);
+        assert!(date_error.is_err());
+        assert!(time_error.is_err());
+        assert!(int_error.is_err());
+        assert!(float_error.is_err());
     }
 }

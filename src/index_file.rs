@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 
@@ -14,23 +12,25 @@ use crate::{
     read_write_types::ReadWriteTypes,
 };
 /// Indexfile page structure:
-/// Header: 0x00-0x0F
-///     * 0x00-0x00: Page type
-///     * 0x01-0x01: Unused space
-///     * 0x02-0x03: Number of cells
-///     * 0x04-0x05: Start of content area
-///     * 0x06-0x09: Rightmost child page
-///     * 0x0A-0x0D: Parent page
-///     * 0x0E-0x0F: Unused
-/// Cell offsets: 0x10-0x1F
-///     * 2-byte offsets to the start of each cell
+/// Header: `0x00-0x0F`
+///    * `0x00-0x00`: Page type
+///    * `0x01-0x01`: Unused space
+///    * `0x02-0x03`: Number of cells
+///    * `0x04-0x05`: Start of content area
+///    * `0x06-0x09`: Rightmost child page
+///    * `0x0A-0x0D`: Parent page
+///    * `0x0E-0x0F`: Unused
+///
+/// Cell offsets: `0x10-0x1F`
+///    * `2-byte` offsets to the start of each cell
+///
 /// Cells:
-///     * Child page: 4-bytes, pointer to the child page, interior index pages only
-///     * Payload size: 2-bytes, size in bytes of cell excluding child page and payload size
-///     * Number of row IDs: 1-byte, number of row IDs
-///     * Payload type: 1-byte, data type of the payload
-///     * value: Variable length, the value of the cell
-///     * Row IDs: 4-bytes each, row IDs with the value
+///    * Child page: `4-bytes`, pointer to the child page, interior index pages only
+///    * Payload size: `2-bytes`, size in bytes of cell excluding child page and payload size
+///    * Number of row IDs: `1-byte`, number of row IDs
+///    * Payload type: `1-byte`, data type of the payload
+///    * value: Variable length, the value of the cell
+///    * Row IDs: `4-bytes` each, row IDs with the value
 pub struct IndexFile {
     file: File,
 }
@@ -91,10 +91,11 @@ impl IndexFile {
     /// Reads a value from the index file at `page` and `offset`.
     ///
     /// Args:
-    ///     * `page` - The page number to read from.
-    ///     * `offset` - The offset within the page to read from.
+    ///    * `page` - The page number to read from.
+    ///    * `offset` - The offset within the page to read from.
+    ///
     /// Returns:
-    ///     * [`Option<DataType>`]: The value read from the index file. Returns [`None`] if the payload size is 0.
+    ///    * [`Option<DataType>`]: The value read from the index file. Returns [`None`] if the payload size is 0.
     pub fn read_index_value(&mut self, page: u32, offset: u16) -> Option<DataType> {
         let page_type = self.get_page_type(page);
         self.seek_to_page_offset(page, offset);
@@ -401,7 +402,7 @@ impl IndexFile {
     pub fn remove_item_from_cell(&mut self, row_id: u32, value: &DataType) {
         let (page, index) = self
             .find_value(value)
-            .unwrap_or_else(|(p, _)| panic!("Value not found: {}", value));
+            .unwrap_or_else(|(_, _)| panic!("Value not found: {}", value));
         let offset = self.get_cell_offset(page, index);
         let (_, _, mut row_ids) = self.read_full_index_value(page, offset);
         let id_index = match row_ids.iter().position(|id| id == &row_id) {
@@ -436,7 +437,7 @@ impl IndexFile {
     fn remove_cell(&mut self, page: u32, index: u16, steal: bool) {
         let page_type = self.get_page_type(page);
         let offset = self.get_cell_offset(page, index);
-        let (value, child_page, _) = self.read_full_index_value(page, offset);
+        let (_, child_page, _) = self.read_full_index_value(page, offset);
         self.seek_to_page_offset(page, offset);
         if page_type == PageType::IndexInterior {
             self.skip_bytes(4);
@@ -476,7 +477,6 @@ impl IndexFile {
             self.delete_page(page);
             return;
         }
-        let index = self.find_page_pointer_index(parent_page, page);
         if let Some(right) = self.right_sibling(page) {
             match self.get_num_cells(right) {
                 0 => panic!(
@@ -1035,6 +1035,16 @@ mod test {
     }
 
     #[test]
+    fn test_index_search_intager() {
+        let mut index_file = setup("test_index_search_integer", 2, "data/testdata.txt");
+        let value = DataType::Int(9);
+        let search_result = index_file.search(&value, "=");
+        assert_eq!(1, search_result.len());
+        assert_eq!(6, search_result[0]);
+        teardown("test_index_search_integer");
+    }
+
+    #[test]
     fn test_index_long_file() {
         let index_file = setup("test_index_long_file", 2, "data/longdata.txt");
         assert_ne!(10, index_file.len() / PAGE_SIZE);
@@ -1079,7 +1089,7 @@ mod test {
     fn test_index_remove_last_cell_right() {
         let mut index_file = setup_index_file("test_index_remove_last_cell_right");
         let page = 2;
-        for i in 0..8 {
+        for _ in 0..8 {
             let offset = index_file.get_cell_offset(page, 0);
             let (value, _, row_ids) = index_file.read_full_index_value(page, offset);
             if let Some(value) = value {
@@ -1097,7 +1107,7 @@ mod test {
     fn test_index_remove_last_cell_left() {
         let mut index_file = setup_index_file("test_index_remove_last_cell_left");
         let page = 0;
-        for i in 0..8 {
+        for _ in 0..8 {
             let offset = index_file.get_cell_offset(page, 0);
             let (value, _, row_ids) = index_file.read_full_index_value(page, offset);
             if let Some(value) = value {
@@ -1115,7 +1125,7 @@ mod test {
     fn test_index_remove_last_cell_interior() {
         let mut index_file = setup_index_file("test_index_remove_last_cell_interior");
         let page = 1;
-        for i in 0..8 {
+        for _ in 0..8 {
             let offset = index_file.get_cell_offset(page, 1);
             let (value, _, row_ids) = index_file.read_full_index_value(page, offset);
             if let Some(value) = value {
